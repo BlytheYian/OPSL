@@ -16,5 +16,28 @@ services:
       timeout: 5s
       retries: 10
 
+  backend:
+    build: .
+    ports:
+      - "${PORT:-3000}:3000"
+    environment:
+      DATABASE_URL: postgres://${POSTGRES_USER:-yiyuanju}:${POSTGRES_PASSWORD:-yiyuanju}@db:5432/${POSTGRES_DB:-yiyuanju}
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      PORT: 3000
+      NODE_ENV: ${NODE_ENV:-development}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_MODEL: ${ANTHROPIC_MODEL:-claude-sonnet-5}
+      LLM_PROVIDER: ${LLM_PROVIDER:-ollama}
+      OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
+      OLLAMA_MODEL: ${OLLAMA_MODEL:-gemma4:E4B}
+      EDIT_COMMAND_MATCHER: ${EDIT_COMMAND_MATCHER:-}
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./storage:/app/storage
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+
 volumes:
   db_data:
