@@ -9,7 +9,7 @@ services:
       - "5432:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
-      - ./init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+      - ./backend/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-yiyuanju}"]
       interval: 5s
@@ -17,7 +17,7 @@ services:
       retries: 10
 
   backend:
-    build: .
+    build: ./backend
     ports:
       - "${PORT:-3000}:3000"
     environment:
@@ -35,9 +35,20 @@ services:
       db:
         condition: service_healthy
     volumes:
-      - ./storage:/app/storage
+      - ./backend/storage:/app/storage
     extra_hosts:
       - "host.docker.internal:host-gateway"
 
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        VITE_API_URL: /api/v1
+    ports:
+      - "${FRONTEND_PORT:-8080}:80"
+    depends_on:
+      - backend
+
 volumes:
   db_data:
+    name: backend_db_data
