@@ -1,0 +1,29 @@
+# Logs
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+node_modules
+dist
+dist-ssr
+*.local
+
+# InteriorGS 資料衍生的檔案——授權條款明確禁止「透過其他媒介重新散布下載的資料」,
+# 這個 repo 如果之後要公開,絕對不能把這些檔案一起 commit 進去(程式碼本身沒問題,只有資料檔案)
+public/models/interiorgs*-objects/
+
+# Editor directories and files
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+.env

@@ -1,0 +1,50 @@
+:root {
+  --color-pine: #3C5B4E;
+  --color-sage: #8FA694;
+  --color-clay: #C09274;
+  --color-oat: #B4A179;
+  --color-paper: #F6F3EC;
+  --color-surface: #FFFFFF;
+  --color-surface-2: #EFEAE0;
+  --color-ink: #23281F;
+  --color-ink-soft: #5B6259;
+  --color-line: #DDD6C7;
+
+  --radius: 10px;
+  --sans: "Noto Sans TC", "PingFang TC", "Microsoft JhengHei", -apple-system, sans-serif;
+  --serif: "Noto Serif TC", "Source Han Serif TC", serif;
+
+  color-scheme: light;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html, body, #app {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  font-family: var(--sans);
+  color: var(--color-ink);
+  background: var(--color-paper);
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+h1, h2, h3 {
+  font-family: var(--serif);
+  text-wrap: balance;
+  margin: 0;
+}
+
+button {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+a {
+  color: inherit;
+}

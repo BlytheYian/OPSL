@@ -1,0 +1,45 @@
+{
+  "name": "yiyu-anju-backend",
+  "version": "1.0.0",
+  "private": true,
+  "main": "dist/server.js",
+  "engines": {
+    "node": ">=20.9.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/server.js",
+    "dev": "tsx watch src/server.ts",
+    "seed": "tsx src/seed.ts",
+    "import:opsl": "tsx src/importOpslAssets.ts",
+    "thumbnails:generate": "tsx src/generateThumbnails.ts",
+    "clip:generate": "tsx src/generateClipEmbeddings.ts"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
+    "@huggingface/transformers": "^4.2.0",
+    "@types/multer": "^2.2.0",
+    "bcryptjs": "^2.4.3",
+    "cookie-parser": "^1.4.6",
+    "cors": "^2.8.5",
+    "express": "^4.19.2",
+    "express-async-errors": "^3.1.1",
+    "helmet": "^7.1.0",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.2.0",
+    "pg": "^8.12.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/bcryptjs": "^2.4.6",
+    "@types/cookie-parser": "^1.4.7",
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/jsonwebtoken": "^9.0.6",
+    "@types/node": "^20.14.0",
+    "@types/pg": "^8.11.6",
+    "puppeteer": "^25.4.0",
+    "tsx": "^4.16.0",
+    "typescript": "^5.5.4"
+  }
+}

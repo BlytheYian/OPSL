@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>frontend</title>
+    <!-- 讓瀏覽器原生 ES module 解析器認得裸模組名稱 "playcanvas":
+         PlayCanvas 的 script asset(如 camera-controls.mjs)是在執行期用原生瀏覽器載入,不經過 Vite 打包,
+         內部的 import 'playcanvas' 需要 import map 才能解析 -->
+    <script type="importmap">
+      { "imports": { "playcanvas": "/scripts/playcanvas.mjs" } }
+    </script>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
