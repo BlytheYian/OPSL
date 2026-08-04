@@ -474,33 +474,38 @@ watch(
 )
 
 defineExpose({
-  addModel(url: string, id: string, dataRotation?: Vec3): 'added' | 'already-present' | 'not-ready' {
-    if (!isActive || !pcRef || !appRef) return 'not-ready'
-    if (entitiesById.has(id)) return 'already-present'
+  addModel(url: string, id: string, dataRotation?: Vec3): Promise<'added' | 'already-present' | 'not-ready'> {
+    if (!isActive || !pcRef || !appRef) return Promise.resolve('not-ready')
+    if (entitiesById.has(id)) return Promise.resolve('already-present')
     const pc = pcRef
     const app = appRef
     const kind = kindForUrl(url)
     const rotation = dataRotation ?? (kind === 'mesh' ? ([0, 0, 0] as Vec3) : ([180, 0, 0] as Vec3))
     const asset = new pc.Asset(`extra-${id}`, kind === 'mesh' ? 'container' : 'gsplat', { url })
     app.assets.add(asset)
-    asset.once('load', () => {
-      if (!isActive) return
-      const root = new pc.Entity(`Instance-extra-${id}`)
-      app.root.addChild(root)
-      const splat = new pc.Entity(`Splat-extra-${id}`)
-      splat.setLocalEulerAngles(rotation[0], rotation[1], rotation[2])
-      if (kind === 'mesh') {
-        splat.addChild(asset.resource.instantiateRenderEntity())
-      } else {
-        splat.addComponent('gsplat', { asset })
-      }
-      root.addChild(splat)
-      session.entities.add(root)
-      root.enabled = session.active
-      entitiesById.set(id, { root, splat, kind })
+    return new Promise((resolve) => {
+      asset.once('load', () => {
+        if (!isActive) {
+          resolve('not-ready')
+          return
+        }
+        const root = new pc.Entity(`Instance-extra-${id}`)
+        app.root.addChild(root)
+        const splat = new pc.Entity(`Splat-extra-${id}`)
+        splat.setLocalEulerAngles(rotation[0], rotation[1], rotation[2])
+        if (kind === 'mesh') {
+          splat.addChild(asset.resource.instantiateRenderEntity())
+        } else {
+          splat.addComponent('gsplat', { asset })
+        }
+        root.addChild(splat)
+        session.entities.add(root)
+        root.enabled = session.active
+        entitiesById.set(id, { root, splat, kind })
+        resolve('added')
+      })
+      app.assets.load(asset)
     })
-    app.assets.load(asset)
-    return 'added'
   },
   removeModel(id: string) {
     const entry = entitiesById.get(id)

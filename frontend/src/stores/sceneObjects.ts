@@ -27,6 +27,8 @@ interface UpdateInstancePayload {
 
 interface EditCommandResult {
   instances: SceneObjectInstance[]
+  removedIds: string[]
+  added: SceneObjectInstance[]
   reasoning: string | null
 }
 
@@ -203,6 +205,20 @@ export const useSceneObjectsStore = defineStore('sceneObjects', {
         }
       }
       if (before.length) this.pushHistory({ kind: 'update', before, after, label: command })
+
+      for (const removedId of result.removedIds) {
+        const instance = this.instances.find((i) => i.id === removedId)
+        if (!instance) continue
+        const removedSnapshot = snapshot(instance)
+        this.instances = this.instances.filter((i) => i.id !== removedId)
+        this.pushHistory({ kind: 'remove', instance: removedSnapshot, label: command })
+      }
+
+      for (const addedInstance of result.added) {
+        this.instances.push(addedInstance)
+        this.pushHistory({ kind: 'add', instance: snapshot(addedInstance), label: command })
+      }
+
       return result
     },
 

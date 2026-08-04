@@ -77,13 +77,18 @@ const VISION_SYSTEM_PROMPT = `你在看一張 3D 場景編輯器目前畫面的�
 - 指令指的是「一個特定物件」時(例如「牆角的椅子」「紅色的花」),陣列只回傳最符合的那一個。
 - 指令指的是「一整類、所有符合的」物件時(例如「所有椅子」「每一扇窗戶」),把畫面中每一個符合的
   都各自回傳一個元素。
+- 指令是「把 A 換成 B」「A 換一個 B 好了」這種替換說法(例如「把單人沙發換成雙人沙發」)時,要找
+  的是畫面裡現有的 A(單人沙發),不是 B(雙人沙發)——B 是使用者想換成的新描述,畫面裡通常根本
+  沒有這個東西,不要因為指令提到 B 就去找長得像 B 的物件。
 - 找不到符合指令描述的物件,回傳空陣列 []。`;
 
-const DELTA_SYSTEM_PROMPT = `你是一個 3D 場景編輯助手,做純文字的結構化資料轉換——使用者會用中文
-下一句編輯指令,要編輯哪個物件已經由另一個步驟決定好了,你只需要把指令換算成具體的數值調整。
+const ACTION_SYSTEM_PROMPT = `你是一個 3D 場景編輯助手,做純文字的結構化資料轉換——使用者會用中文
+下一句編輯指令,要編輯哪個物件已經由另一個步驟決定好了,你只需要判斷這句指令屬於哪一種動作、
+並把它換算成具體的數值調整。
 
-回傳一個 JSON **物件**(不是陣列),欄位都要有,不需要調整的填 null 或 false:
+回傳一個 JSON **物件**(不是陣列),欄位都要有,不需要的填 null 或 false:
 {
+  "action": "adjust" 或 "hide" 或 "delete" 或 "replace",
   "positionDelta": [dx, dy, dz] 或 null,
   "rotationDelta": [drx, dry, drz] 或 null,
   "scaleMultiplier": [sx, sy, sz] 或 null,
@@ -92,8 +97,24 @@ const DELTA_SYSTEM_PROMPT = `你是一個 3D 場景編輯助手,做純文字的�
   "resetRotation": true 或 false,
   "resetScale": true 或 false,
   "resetColor": true 或 false,
+  "replacementQuery": "..." 或 null,
   "reasoning": "一句話說明你做了什麼調整"
 }
+
+先判斷 action(四選一,只能選一個):
+- "adjust":移動/旋轉/縮放/改色/恢復原狀——物件本身不變,只是調整它的位置、朝向、大小或顏色。
+  這是預設情況,大部分指令都是這一種。
+- "hide":使用者說「清空」「先移開」「暫時拿掉」「藏起來」「擋住不要看到」這類語氣——物件其實
+  還在場景裡,只是暫時不想讓它出現、擋到視角或動線判斷,不是真的要永久拿掉它。
+- "delete":使用者說「刪除」「移除」「拆掉」「丟掉」「不要了」這類明確、永久性的語氣——真的要
+  把這個物件從場景裡拿掉。
+- "replace":使用者說「把 A 換成 B」「A 換一個 B 好了」「這個我想換成別的」這類明確表示「拿掉
+  原本這個,改放一個不同東西」的語氣——不是調整原本這個物件,是要用另一個物件取代它。
+
+action 是 "adjust" 時,positionDelta/rotationDelta/scaleMultiplier/color/reset* 欄位照下面規則
+填;action 是其他三種時,這幾個欄位全部填 null/false。action 是 "replace" 時,replacementQuery
+填「要換成什麼」的中文描述(例如「把單人沙發換成雙人沙發」→ replacementQuery 填 "雙人沙發";
+「這張椅子我想換一張比較現代風格的」→ replacementQuery 填 "現代風格的椅子"),其他情況填 null。
 
 - positionDelta 是相對移動量(不是新的絕對座標),**用「鏡頭相對」座標,不是世界座標**:
   [往右移多少, 往上移多少, 往螢幕裡面(遠離鏡頭)移多少]——正值分別代表「使用者螢幕上看到的
@@ -151,9 +172,10 @@ const VISION_JSON_SCHEMA = {
   },
 };
 
-const DELTA_JSON_SCHEMA = {
+const ACTION_JSON_SCHEMA = {
   type: "object",
   properties: {
+    action: { type: "string", enum: ["adjust", "hide", "delete", "replace"] },
     positionDelta: { type: ["array", "null"], items: { type: "number" }, minItems: 3, maxItems: 3 },
     rotationDelta: { type: ["array", "null"], items: { type: "number" }, minItems: 3, maxItems: 3 },
     scaleMultiplier: { type: ["array", "null"], items: { type: "number" }, minItems: 3, maxItems: 3 },
@@ -162,9 +184,11 @@ const DELTA_JSON_SCHEMA = {
     resetRotation: { type: "boolean" },
     resetScale: { type: "boolean" },
     resetColor: { type: "boolean" },
+    replacementQuery: { type: ["string", "null"] },
     reasoning: { type: ["string", "null"] },
   },
   required: [
+    "action",
     "positionDelta",
     "rotationDelta",
     "scaleMultiplier",
@@ -173,6 +197,7 @@ const DELTA_JSON_SCHEMA = {
     "resetRotation",
     "resetScale",
     "resetColor",
+    "replacementQuery",
     "reasoning",
   ],
 };
@@ -316,7 +341,8 @@ async function identifyInstances(
   return best ? [best] : [...matched.values()];
 }
 
-interface DeltaResult {
+interface ActionResult {
+  action: "adjust" | "hide" | "delete" | "replace";
   positionDelta: [number, number, number] | null;
   rotationDelta: [number, number, number] | null;
   scaleMultiplier: [number, number, number] | null;
@@ -325,13 +351,14 @@ interface DeltaResult {
   resetRotation: boolean;
   resetScale: boolean;
   resetColor: boolean;
+  replacementQuery: string | null;
   reasoning: string | null;
 }
 
-async function extractDelta(command: string): Promise<DeltaResult> {
+async function extractAction(command: string): Promise<ActionResult> {
   const provider = getLLMProvider();
   const userPrompt = `使用者指令:「${command}」\n\n請回傳符合說明格式的 JSON。`;
-  const raw = await provider.complete(DELTA_SYSTEM_PROMPT, userPrompt, { jsonSchema: DELTA_JSON_SCHEMA });
+  const raw = await provider.complete(ACTION_SYSTEM_PROMPT, userPrompt, { jsonSchema: ACTION_JSON_SCHEMA });
 
   let parsed: unknown;
   try {
@@ -350,6 +377,7 @@ async function extractDelta(command: string): Promise<DeltaResult> {
   }
 
   return {
+    action: result.data.action ?? "adjust",
     positionDelta: result.data.positionDelta ?? null,
     rotationDelta: result.data.rotationDelta ?? null,
     scaleMultiplier: result.data.scaleMultiplier ?? null,
@@ -358,6 +386,7 @@ async function extractDelta(command: string): Promise<DeltaResult> {
     resetRotation: result.data.resetRotation ?? false,
     resetScale: result.data.resetScale ?? false,
     resetColor: result.data.resetColor ?? false,
+    replacementQuery: result.data.replacementQuery ?? null,
     reasoning: result.data.reasoning ?? null,
   };
 }
@@ -391,7 +420,7 @@ async function resolveOneCommand(
   }
   const useClipMatcher = process.env.EDIT_COMMAND_MATCHER === "clip";
 
-  const [matchedInstances, delta] = await Promise.all([
+  const [matchedInstances, action] = await Promise.all([
     reusePrevious
       ? Promise.resolve(previousContext!.instances)
       : withRetry(() =>
@@ -399,7 +428,7 @@ async function resolveOneCommand(
             ? identifyInstancesClip(item.text, visible, previousContext)
             : identifyInstances(item.text, imageBase64, visible)
         ),
-    withRetry(() => extractDelta(item.text)),
+    withRetry(() => extractAction(item.text)),
   ]);
 
   const matchedNote = reusePrevious
@@ -410,15 +439,20 @@ async function resolveOneCommand(
 
   return {
     instanceIds: matchedInstances.map((m) => m.id),
-    positionDelta: delta.positionDelta ? cameraRelativeToWorld(delta.positionDelta, cameraAxes) : null,
-    rotationDelta: delta.rotationDelta,
-    scaleMultiplier: delta.scaleMultiplier,
-    color: delta.color,
-    resetPosition: delta.resetPosition,
-    resetRotation: delta.resetRotation,
-    resetScale: delta.resetScale,
-    resetColor: delta.resetColor,
-    reasoning: matchedNote + (delta.reasoning ?? ""),
+    action: action.action,
+    positionDelta:
+      action.action === "adjust" && action.positionDelta
+        ? cameraRelativeToWorld(action.positionDelta, cameraAxes)
+        : null,
+    rotationDelta: action.action === "adjust" ? action.rotationDelta : null,
+    scaleMultiplier: action.action === "adjust" ? action.scaleMultiplier : null,
+    color: action.action === "adjust" ? action.color : null,
+    resetPosition: action.action === "adjust" && action.resetPosition,
+    resetRotation: action.action === "adjust" && action.resetRotation,
+    resetScale: action.action === "adjust" && action.resetScale,
+    resetColor: action.action === "adjust" && action.resetColor,
+    replacementQuery: action.action === "replace" ? action.replacementQuery : null,
+    reasoning: matchedNote + (action.reasoning ?? ""),
   };
 }
 

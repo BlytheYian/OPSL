@@ -73,11 +73,19 @@ const DESCRIPTOR_SYSTEM_PROMPT = `你在幫忙把中文的物件描述轉換成�
 - typeQuery:物件的類型/形狀,翻成幾個簡短的英文單字,不要包含顏色(例如「紅色的花瓶」→
   "vase"、「有靠背的椅子」→ "chair with backrest")。如果句子是「A 的左邊/旁邊那個 B」這種
   結構(A 是另一個參考物件,B 才是真正要選的目標),只翻譯 B 的類型,不要翻 A(例如「剛剛改的
-  椅子左邊的桌子」→ "table",不是 "chair")。如果句子描述的完全不是外觀/類型(例如「所有改變
-  顏色的物件」這種在講修改歷史狀態的描述),填一個通用詞 "object" 即可。
-- colorName:使用者描述裡如果有提到「目標物件」本身的顏色(不是參考物件的顏色),翻成一個
-  英文顏色單字(red/blue/yellow/brown/green/white/black/gray/orange/purple/pink 這幾個裡面
-  選最接近的一個);沒提到就是 null。
+  椅子左邊的桌子」→ "table",不是 "chair")。如果句子是「把 A 換成 B」「A 換一個 B 好了」這種
+  替換結構(A 是場景裡現有、要被換掉的物件,B 是使用者想換成的新描述,場景裡通常根本沒有 B 這個
+  東西),要在畫面裡找的是 A,只翻譯 A 的類型,不要翻 B(例如「把桌上的花換成盤子」→ "flower",
+  不是 "plate";「把單人沙發換成雙人沙發」→ "sofa",不是 "double sofa")。如果句子描述的完全
+  不是外觀/類型(例如「所有改變顏色的物件」這種在講修改歷史狀態的描述),填一個通用詞 "object"
+  即可。
+- colorName:使用者描述裡如果有提到「目標物件」**目前/現在**的顏色(不是想改成的目標顏色,也
+  不是參考物件的顏色),翻成一個英文顏色單字(red/blue/yellow/brown/green/white/black/gray/
+  orange/purple/pink 這幾個裡面選最接近的一個)。這個欄位是用來從場景裡「認出」是哪個物件的,
+  不是要改成的新顏色。指令若是「把 A 從 X 色改成 Y 色」「A 現在是 X 色,想改成 Y 色」這種同時
+  描述目前顏色+目標顏色的句型,X 才是這裡要填的(現在的顏色,用來認物件),不要填 Y(想改成的
+  目標顏色,那是給調整動作用的,跟這裡無關)——例如「把椅子從黑色改成白色」填 "black",不是
+  "white"。沒有提到目前顏色就是 null。
 
 回傳一個 JSON 物件:{"typeQuery": "...", "colorName": "..." 或 null}`;
 
@@ -101,12 +109,26 @@ function stripCodeFence(raw: string): string {
   return match ? match[1] : trimmed;
 }
 
-async function extractDescriptor(command: string): Promise<Descriptor> {
+export async function extractDescriptor(command: string): Promise<Descriptor> {
   const provider = getLLMProvider();
   const userPrompt = `使用者描述:「${command}」\n\n請回傳符合說明格式的 JSON。`;
   const raw = await provider.complete(DESCRIPTOR_SYSTEM_PROMPT, userPrompt, { jsonSchema: DESCRIPTOR_JSON_SCHEMA });
   const parsed = JSON.parse(stripCodeFence(raw)) as Partial<Descriptor>;
   return { typeQuery: parsed.typeQuery ?? "object", colorName: parsed.colorName ?? null };
+}
+
+export async function findReplacementModel(query: string): Promise<{ id: string; name: string } | null> {
+  const descriptor = await extractDescriptor(query);
+  const searchText = descriptor.colorName ? `${descriptor.colorName} ${descriptor.typeQuery}` : descriptor.typeQuery;
+  const queryEmbed = await embedText(searchText);
+
+  const rows = await pool.query(`SELECT id, name, clip_embedding FROM library_objects WHERE clip_embedding IS NOT NULL`);
+  let best: { id: string; name: string; score: number } | null = null;
+  for (const row of rows.rows) {
+    const score = cosineSimilarity(queryEmbed, row.clip_embedding);
+    if (!best || score > best.score) best = { id: row.id, name: row.name, score };
+  }
+  return best ? { id: best.id, name: best.name } : null;
 }
 
 interface ScoredCandidate {
@@ -202,6 +224,9 @@ JSON 陣列,每個元素是場景裡一個「目前看得到的物件副本」�
 - 句子是「A 的左邊/旁邊那個 B」這種結構:A 是參考物件,先用「上一輪操作對象」(如果有提供)或
   候選清單裡描述符合 A 的紀錄定位出 A 的座標,再從符合 B 描述的候選裡,依 A 的座標挑方向正確、
   離 A 最近的那一筆當作答案——最終要回傳的是 B,不是 A。
+- 句子是「把 A 換成 B」「A 換一個 B 好了」這種替換結構:要選的是符合 A 描述的紀錄(場景裡現有、
+  要被換掉的東西),不是 B——B 是使用者想換成的新描述,候選清單裡通常根本沒有這個東西,不要因為
+  指令裡出現 B 這個詞,就去找長得像 B 的紀錄。
 - 找不到任何符合的紀錄:回傳空陣列。
 
 回傳一個 JSON 物件:{"selectedIds": ["...", ...]}`;

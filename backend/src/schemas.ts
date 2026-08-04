@@ -77,6 +77,7 @@ export const VisionMatchSchema = z.array(VisionBoxSchema);
 export type VisionMatch = z.infer<typeof VisionMatchSchema>;
 
 export const LLMEditDeltaSchema = z.object({
+  action: z.enum(["adjust", "hide", "delete", "replace"]).default("adjust"),
   positionDelta: Vec3Schema.nullable().optional(),
   rotationDelta: Vec3Schema.nullable().optional(),
   scaleMultiplier: Vec3Schema.nullable().optional(),
@@ -85,6 +86,7 @@ export const LLMEditDeltaSchema = z.object({
   resetRotation: z.boolean().optional(),
   resetScale: z.boolean().optional(),
   resetColor: z.boolean().optional(),
+  replacementQuery: z.string().nullable().optional(),
   reasoning: z.string().nullable().optional(),
 });
 export type LLMEditDelta = z.infer<typeof LLMEditDeltaSchema>;
@@ -96,6 +98,7 @@ export type CreateVersionRequest = z.infer<typeof CreateVersionRequestSchema>;
 
 export interface ResolvedEditAction {
   instanceIds: string[];
+  action: "adjust" | "hide" | "delete" | "replace";
   positionDelta: [number, number, number] | null;
   rotationDelta: [number, number, number] | null;
   scaleMultiplier: [number, number, number] | null;
@@ -104,5 +107,6 @@ export interface ResolvedEditAction {
   resetRotation: boolean;
   resetScale: boolean;
   resetColor: boolean;
+  replacementQuery: string | null;
   reasoning: string | null;
 }

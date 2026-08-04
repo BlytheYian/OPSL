@@ -1,5 +1,6 @@
 import type { LLMProvider } from "./provider";
 import { OllamaProvider } from "./ollamaProvider";
+import { AnthropicProvider } from "./anthropicProvider";
 
 export type { LLMProvider } from "./provider";
 
@@ -11,6 +12,9 @@ export function getLLMProvider(): LLMProvider {
   switch (kind) {
     case "ollama":
       cached = new OllamaProvider();
+      break;
+    case "claude":
+      cached = new AnthropicProvider();
       break;
     default:
       throw new Error(`未知的 LLM_PROVIDER: ${kind}`);

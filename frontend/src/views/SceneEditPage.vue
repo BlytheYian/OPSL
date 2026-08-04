@@ -105,7 +105,14 @@ async function syncHistoryChange(change: Awaited<ReturnType<typeof sceneObjectsS
   }
   for (const inst of change.added) {
     const modelUrl = library.objects.find((o) => o.id === inst.modelId)?.modelUrl
-    if (modelUrl) viewerRef.value?.addModel(modelUrl, inst.id, upAxisFixFor(inst.modelId, modelUrl))
+    if (!modelUrl) continue
+    await viewerRef.value?.addModel(modelUrl, inst.id, upAxisFixFor(inst.modelId, modelUrl))
+    viewerRef.value?.updateInstanceTransform(inst.id, {
+      position: inst.position,
+      rotation: inst.rotation,
+      scale: inst.scale,
+    })
+    viewerRef.value?.updateInstanceColor(inst.id, inst.color, modelUrl)
   }
   for (const inst of change.updated) {
     viewerRef.value?.updateInstanceTransform(inst.id, {
@@ -212,25 +219,17 @@ async function submitEditCommand() {
       lastEditContext.value,
       cameraAxes
     )
-    for (const inst of result.instances) {
-      viewerRef.value?.updateInstanceTransform(inst.id, {
-        position: inst.position,
-        rotation: inst.rotation,
-        scale: inst.scale,
-      })
-      if (inst.color) {
-        const modelUrl = library.objects.find((o) => o.id === inst.modelId)?.modelUrl
-        if (modelUrl) viewerRef.value?.updateInstanceColor(inst.id, inst.color, modelUrl)
-      }
-    }
-    const last = result.instances.at(-1)
-    if (last) selectedObjectId.value = last.id
+    await syncHistoryChange({ updated: result.instances, added: result.added, removedIds: result.removedIds })
+    const touchedIds = [...result.instances.map((i) => i.id), ...result.added.map((i) => i.id)]
+    const last = touchedIds.at(-1)
+    if (last) selectedObjectId.value = last
+    const totalCount = result.instances.length + result.added.length + result.removedIds.length
     editCommandFeedback.value = result.reasoning
-      ? `✓ ${result.reasoning}(共 ${result.instances.length} 個物件)`
-      : `✓ 已套用(共 ${result.instances.length} 個物件)`
+      ? `✓ ${result.reasoning}(共 ${totalCount} 個物件)`
+      : `✓ 已套用(共 ${totalCount} 個物件)`
     lastEditContext.value = {
       command,
-      instances: result.instances.map((i) => ({ id: i.id, label: i.label })),
+      instances: [...result.instances, ...result.added].map((i) => ({ id: i.id, label: i.label })),
     }
     editCommandText.value = ''
   } catch (err) {

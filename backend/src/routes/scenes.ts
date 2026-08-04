@@ -8,6 +8,7 @@ import {
   CreateVersionRequestSchema,
 } from "../schemas";
 import { resolveEditCommand } from "../llm/editCommand";
+import { findReplacementModel } from "../clip/matchInstances";
 
 /**
  * 場景內物件擺放記錄(SceneObjectInstance)的 CRUD,取代前端 stores/sceneObjects.ts
@@ -148,8 +149,50 @@ scenesRouter.post("/scenes/:sceneId/edit-commands", requireAuth, async (req, res
   // 一次下,不然不同動作的顏色/位置調整會互相覆蓋掉。用 Map 依 id 去重,同一筆記錄如果先後被
   // 兩個動作都改到,只保留最後一次的結果。
   const updatedById = new Map<string, ReturnType<typeof toInstanceDTO>>();
+  const removedIds = new Set<string>();
+  const added: ReturnType<typeof toInstanceDTO>[] = [];
   const reasonings: string[] = [];
+
   for (const action of actions) {
+    if (action.reasoning) reasonings.push(action.reasoning);
+
+    if (action.action === "delete") {
+      const result = await pool.query(
+        `DELETE FROM scene_object_instances WHERE id = ANY($1) AND scene_id = $2 RETURNING id`,
+        [action.instanceIds, req.params.sceneId]
+      );
+      for (const row of result.rows) {
+        updatedById.delete(row.id);
+        removedIds.add(row.id);
+      }
+      continue;
+    }
+
+    if (action.action === "replace") {
+      const replacement = action.replacementQuery ? await findReplacementModel(action.replacementQuery) : null;
+      if (!replacement) {
+        return res.status(422).json({ error: "找不到符合描述的替代模型" });
+      }
+      const targetsResult = await pool.query(
+        `SELECT * FROM scene_object_instances WHERE id = ANY($1) AND scene_id = $2`,
+        [action.instanceIds, req.params.sceneId]
+      );
+      for (const row of targetsResult.rows) {
+        await pool.query(`DELETE FROM scene_object_instances WHERE id = $1`, [row.id]);
+        updatedById.delete(row.id);
+        removedIds.add(row.id);
+
+        const newId = makeInstanceId();
+        const insertResult = await pool.query(
+          `INSERT INTO scene_object_instances (id, scene_id, model_id, label, pos_x, pos_y, pos_z, color)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
+          [newId, req.params.sceneId, replacement.id, replacement.name, row.pos_x, row.pos_y, row.pos_z, row.color]
+        );
+        added.push(toInstanceDTO(insertResult.rows[0]));
+      }
+      continue;
+    }
+
     const result = await pool.query(
       // COALESCE($n, 0)/COALESCE($n, 1) 的字面 0/1 不能寫成裸數字——Postgres 從查詢文字推斷參數
       // 型別時,會拿 COALESCE 裡另一個分支(裸的整數字面量)去統一型別,把 $n 定成 INTEGER,
@@ -162,7 +205,8 @@ scenesRouter.post("/scenes/:sceneId/edit-commands", requireAuth, async (req, res
       // COALESCE 表達(見 schemas.ts LLMEditDeltaSchema 的說明,delta 是null 只代表「沒有要求
       // 調整」,不是「調整到 0」),resetPosition/resetRotation/resetScale 為 true 時直接設回
       // 新增時的初始值(位置原點、不旋轉、原始大小),不管 delta 欄位有沒有值都不理會。color
-      // 同理,resetColor 為 true 時明確設回 NULL(清掉染色),不是 COALESCE 保留原值。
+      // 同理,resetColor 為 true 時明確設回 NULL(清掉染色),不是 COALESCE 保留原值。action 是
+      // "hide" 時 hidden 直接設 true,其餘情況(adjust)保留原值不動。
       `UPDATE scene_object_instances SET
          pos_x = CASE WHEN $13 THEN 0::numeric ELSE pos_x + COALESCE($3, 0::numeric) END,
          pos_y = CASE WHEN $13 THEN 0::numeric ELSE pos_y + COALESCE($4, 0::numeric) END,
@@ -173,7 +217,8 @@ scenesRouter.post("/scenes/:sceneId/edit-commands", requireAuth, async (req, res
          scale_x = CASE WHEN $15 THEN 1::numeric ELSE scale_x * COALESCE($9, 1::numeric) END,
          scale_y = CASE WHEN $15 THEN 1::numeric ELSE scale_y * COALESCE($10, 1::numeric) END,
          scale_z = CASE WHEN $15 THEN 1::numeric ELSE scale_z * COALESCE($11, 1::numeric) END,
-         color = CASE WHEN $16 THEN NULL ELSE COALESCE($12, color) END
+         color = CASE WHEN $16 THEN NULL ELSE COALESCE($12, color) END,
+         hidden = CASE WHEN $17 THEN true ELSE hidden END
        WHERE id = ANY($1) AND scene_id = $2
        RETURNING *`,
       [
@@ -193,16 +238,21 @@ scenesRouter.post("/scenes/:sceneId/edit-commands", requireAuth, async (req, res
         action.resetRotation,
         action.resetScale,
         action.resetColor,
+        action.action === "hide",
       ]
     );
     for (const row of result.rows) updatedById.set(row.id, toInstanceDTO(row));
-    if (action.reasoning) reasonings.push(action.reasoning);
   }
 
-  if (updatedById.size === 0) {
+  if (updatedById.size === 0 && removedIds.size === 0 && added.length === 0) {
     return res.status(404).json({ error: "找不到符合的物件記錄" });
   }
-  res.json({ instances: [...updatedById.values()], reasoning: reasonings.join(" ") || null });
+  res.json({
+    instances: [...updatedById.values()],
+    removedIds: [...removedIds],
+    added,
+    reasoning: reasonings.join(" ") || null,
+  });
 });
 
 scenesRouter.post("/scenes/:sceneId/risk-check", requireAuth, async (_req, res) => {
