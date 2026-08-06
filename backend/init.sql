@@ -15,6 +15,7 @@ CREATE TABLE library_scenes (
   owner_user_id INTEGER REFERENCES users(id),
   copied_from_scene_id TEXT REFERENCES library_scenes(id),
   celery_task_id TEXT,
+  floor_risks_cache JSONB,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -29,6 +30,10 @@ CREATE TABLE library_objects (
   owner_user_id INTEGER REFERENCES users(id),
   asset_kind TEXT NOT NULL DEFAULT 'gsplat',
   clip_embedding REAL[],
+  category TEXT,
+  baked_centroid_x NUMERIC,
+  baked_centroid_y NUMERIC,
+  baked_centroid_z NUMERIC,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
@@ -68,3 +73,17 @@ CREATE TABLE scene_versions (
 );
 
 CREATE INDEX idx_scene_versions_scene ON scene_versions(scene_id);
+
+CREATE TABLE risk_markers (
+  id SERIAL PRIMARY KEY,
+  scene_version_id INTEGER NOT NULL REFERENCES scene_versions(id) ON DELETE CASCADE,
+  risk_type TEXT NOT NULL CHECK (risk_type IN ('門檻', '家具邊角', '地面高低差', '走道障礙')),
+  bbox_min_x NUMERIC(8, 4) NOT NULL,
+  bbox_min_y NUMERIC(8, 4) NOT NULL,
+  bbox_min_z NUMERIC(8, 4) NOT NULL,
+  bbox_max_x NUMERIC(8, 4) NOT NULL,
+  bbox_max_y NUMERIC(8, 4) NOT NULL,
+  bbox_max_z NUMERIC(8, 4) NOT NULL
+);
+
+CREATE INDEX idx_risk_markers_version ON risk_markers(scene_version_id);

@@ -9,6 +9,17 @@ import {
 } from "../schemas";
 import { resolveEditCommand } from "../llm/editCommand";
 import { findReplacementModel } from "../clip/matchInstances";
+import { detectRisks, type RiskMarker } from "../riskDetection";
+import { detectSceneFloor, computeFloorBounds } from "../floorDetection";
+import { suggestAssetsByRiskType } from "../riskRemediation";
+import { detectRoute } from "../routeDetection";
+
+async function withSuggestedAssets<T extends { riskType: RiskMarker["riskType"] }>(
+  markers: T[]
+): Promise<(T & { suggestedAssets: { id: string; name: string }[] })[]> {
+  const suggestionsByType = await suggestAssetsByRiskType(markers.map((m) => m.riskType));
+  return markers.map((marker) => ({ ...marker, suggestedAssets: suggestionsByType[marker.riskType] ?? [] }));
+}
 
 /**
  * 場景內物件擺放記錄(SceneObjectInstance)的 CRUD,取代前端 stores/sceneObjects.ts
@@ -151,6 +162,7 @@ scenesRouter.post("/scenes/:sceneId/edit-commands", requireAuth, async (req, res
   const updatedById = new Map<string, ReturnType<typeof toInstanceDTO>>();
   const removedIds = new Set<string>();
   const added: ReturnType<typeof toInstanceDTO>[] = [];
+  const intendedPositions: Record<string, [number, number, number]> = {};
   const reasonings: string[] = [];
 
   for (const action of actions) {
@@ -168,6 +180,37 @@ scenesRouter.post("/scenes/:sceneId/edit-commands", requireAuth, async (req, res
       continue;
     }
 
+    if (action.action === "place") {
+      if (!action.placementQuery) continue;
+      const newModel = await findReplacementModel(action.placementQuery);
+      if (!newModel) {
+        return res.status(422).json({ error: `找不到符合「${action.placementQuery}」的物件` });
+      }
+
+      let targetX = 0, targetY = 0, targetZ = 0;
+      if (action.instanceIds.length > 0) {
+        const refInstance = parsed.data.instances.find((i) => i.id === action.instanceIds[0]);
+        if (refInstance?.worldPos) {
+          [targetX, targetY, targetZ] = refInstance.worldPos;
+        }
+      }
+
+      const offset = action.positionDelta ?? [0.5, 0, 0];
+      targetX += offset[0];
+      targetY += offset[1];
+      targetZ += offset[2];
+
+      const newId = makeInstanceId();
+      const insertResult = await pool.query(
+        `INSERT INTO scene_object_instances (id, scene_id, model_id, label, pos_x, pos_y, pos_z)
+         VALUES ($1, $2, $3, $4, 0, 0, 0) RETURNING *`,
+        [newId, req.params.sceneId, newModel.id, newModel.name]
+      );
+      added.push(toInstanceDTO(insertResult.rows[0]));
+      intendedPositions[newId] = [targetX, targetY, targetZ];
+      continue;
+    }
+
     if (action.action === "replace") {
       const replacement = action.replacementQuery ? await findReplacementModel(action.replacementQuery) : null;
       if (!replacement) {
@@ -182,13 +225,15 @@ scenesRouter.post("/scenes/:sceneId/edit-commands", requireAuth, async (req, res
         updatedById.delete(row.id);
         removedIds.add(row.id);
 
+        const refInstance = parsed.data.instances.find((i) => i.id === row.id);
         const newId = makeInstanceId();
         const insertResult = await pool.query(
           `INSERT INTO scene_object_instances (id, scene_id, model_id, label, pos_x, pos_y, pos_z, color)
-           VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING *`,
-          [newId, req.params.sceneId, replacement.id, replacement.name, row.pos_x, row.pos_y, row.pos_z, row.color]
+           VALUES ($1, $2, $3, $4, 0, 0, 0, $5) RETURNING *`,
+          [newId, req.params.sceneId, replacement.id, replacement.name, row.color]
         );
         added.push(toInstanceDTO(insertResult.rows[0]));
+        if (refInstance?.worldPos) intendedPositions[newId] = refInstance.worldPos;
       }
       continue;
     }
@@ -251,18 +296,44 @@ scenesRouter.post("/scenes/:sceneId/edit-commands", requireAuth, async (req, res
     instances: [...updatedById.values()],
     removedIds: [...removedIds],
     added,
+    intendedPositions,
     reasoning: reasonings.join(" ") || null,
   });
 });
 
-scenesRouter.post("/scenes/:sceneId/risk-check", requireAuth, async (_req, res) => {
-  res.status(501).json({ error: "尚未實作", note: "風險偵測,安全階段實作" });
+
+scenesRouter.post("/scenes/:sceneId/risk-check", requireAuth, async (req, res) => {
+  const markers = await detectRisks(req.params.sceneId);
+  res.json(await withSuggestedAssets(markers));
+});
+
+scenesRouter.get("/scenes/:sceneId/floor-detection", requireAuth, async (req, res) => {
+  const result = await detectSceneFloor(req.params.sceneId);
+  if (!result?.mainFloor) return res.json({ bounds: null });
+  res.json({ bounds: computeFloorBounds(result.mainFloor) });
+});
+
+scenesRouter.post("/scenes/:sceneId/route-detection", requireAuth, async (req, res) => {
+  const result = await detectRoute(req.params.sceneId);
+  res.json(result ?? null);
+});
+
+scenesRouter.delete("/scenes/:sceneId/versions/:versionId", requireAuth, async (req, res) => {
+  await pool.query(
+    `DELETE FROM scene_versions WHERE id = $1 AND scene_id = $2 AND source_commands = '[]'::jsonb`,
+    [req.params.versionId, req.params.sceneId]
+  );
+  res.status(204).end();
 });
 
 scenesRouter.post("/scenes/:sceneId/versions", requireAuth, async (req, res) => {
-  const parsed = CreateVersionRequestSchema.safeParse(req.body);
-  if (!parsed.success) return res.status(400).json({ error: parsed.error.message });
-  const sourceCommands = parsed.data.sourceCommands ?? [];
+  await pool.query(
+    `DELETE FROM scene_versions
+     WHERE scene_id = $1
+       AND id = (SELECT id FROM scene_versions WHERE scene_id = $1 ORDER BY version_number DESC LIMIT 1)
+       AND source_commands = '[]'::jsonb`,
+    [req.params.sceneId]
+  );
 
   const instancesResult = await pool.query(
     `SELECT * FROM scene_object_instances WHERE scene_id = $1 ORDER BY created_at ASC`,
@@ -275,11 +346,49 @@ scenesRouter.post("/scenes/:sceneId/versions", requireAuth, async (req, res) => 
   const versionNumber = nextResult.rows[0].next;
   const result = await pool.query(
     `INSERT INTO scene_versions (scene_id, version_number, created_by, snapshot, source_commands)
-     VALUES ($1, $2, $3, $4, $5)
+     VALUES ($1, $2, $3, $4, '[]'::jsonb)
      RETURNING id, version_number, created_at, source_commands, reverted_from_version_id`,
-    [req.params.sceneId, versionNumber, req.userId, JSON.stringify(instancesResult.rows), JSON.stringify(sourceCommands)]
+    [req.params.sceneId, versionNumber, req.userId, JSON.stringify(instancesResult.rows)]
   );
+  const newVersionId = result.rows[0].id;
+
+  const riskMarkers = await detectRisks(req.params.sceneId);
+  for (const marker of riskMarkers) {
+    await pool.query(
+      `INSERT INTO risk_markers
+         (scene_version_id, risk_type, bbox_min_x, bbox_min_y, bbox_min_z, bbox_max_x, bbox_max_y, bbox_max_z)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+      [
+        newVersionId,
+        marker.riskType,
+        marker.bboxMin[0],
+        marker.bboxMin[1],
+        marker.bboxMin[2],
+        marker.bboxMax[0],
+        marker.bboxMax[1],
+        marker.bboxMax[2],
+      ]
+    );
+  }
+
   res.status(201).json(toVersionDTO(result.rows[0]));
+});
+
+scenesRouter.get("/scenes/:sceneId/versions/:versionId/risks", requireAuth, async (req, res) => {
+  const result = await pool.query(
+    `SELECT rm.id, rm.risk_type, rm.bbox_min_x, rm.bbox_min_y, rm.bbox_min_z, rm.bbox_max_x, rm.bbox_max_y, rm.bbox_max_z
+     FROM risk_markers rm
+     JOIN scene_versions sv ON sv.id = rm.scene_version_id
+     WHERE rm.scene_version_id = $1 AND sv.scene_id = $2`,
+    [req.params.versionId, req.params.sceneId]
+  );
+  const markers = result.rows.map((row) => ({
+    id: row.id,
+    riskType: row.risk_type as RiskMarker["riskType"],
+    bboxMin: [Number(row.bbox_min_x), Number(row.bbox_min_y), Number(row.bbox_min_z)] as [number, number, number],
+    bboxMax: [Number(row.bbox_max_x), Number(row.bbox_max_y), Number(row.bbox_max_z)] as [number, number, number],
+  }));
+  res.json(await withSuggestedAssets(markers));
 });
 
 function toVersionDTO(row: any) {
@@ -292,6 +401,16 @@ function toVersionDTO(row: any) {
   };
 }
 
+scenesRouter.patch("/scenes/:sceneId/versions/:versionId/commands", requireAuth, async (req, res) => {
+  const { sourceCommands } = req.body;
+  if (!Array.isArray(sourceCommands)) return res.status(400).json({ error: "格式錯誤" });
+  await pool.query(
+    `UPDATE scene_versions SET source_commands = $1 WHERE id = $2 AND scene_id = $3`,
+    [JSON.stringify(sourceCommands), req.params.versionId, req.params.sceneId]
+  );
+  res.status(204).end();
+});
+
 scenesRouter.get("/scenes/:sceneId/versions", requireAuth, async (req, res) => {
   const result = await pool.query(
     `SELECT id, version_number, created_at, source_commands, reverted_from_version_id FROM scene_versions
@@ -299,6 +418,16 @@ scenesRouter.get("/scenes/:sceneId/versions", requireAuth, async (req, res) => {
     [req.params.sceneId]
   );
   res.json(result.rows.map(toVersionDTO));
+});
+
+scenesRouter.get("/scenes/:sceneId/versions/:versionId/instances", requireAuth, async (req, res) => {
+  const result = await pool.query(
+    `SELECT snapshot FROM scene_versions WHERE id = $1 AND scene_id = $2`,
+    [req.params.versionId, req.params.sceneId]
+  );
+  if (result.rows.length === 0) return res.status(404).json({ error: "找不到這個版本" });
+  const rows = result.rows[0].snapshot as any[];
+  res.json(rows.map(toInstanceDTO));
 });
 
 scenesRouter.post("/scenes/:sceneId/versions/:versionId/restore", requireAuth, async (req, res) => {

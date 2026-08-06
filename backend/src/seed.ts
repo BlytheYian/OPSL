@@ -7,6 +7,7 @@ import { hashPassword } from "./auth";
 
 const REPO_ROOT = path.resolve(__dirname, "..", "..");
 const THUMBNAIL_URL = "/hero-living-room.jpg";
+const BACKEND_ORIGIN = process.env.BACKEND_ORIGIN || "http://localhost:3000";
 
 const DEMO_USERNAME = "demo";
 const DEMO_PASSWORD = "demo1234";
@@ -58,7 +59,7 @@ function interiorgsObjects(): ObjectSeed[] {
     id: "interiorgs839920-background",
     name: "背景",
     description: "InteriorGS 場景 0001_839920 的背景層(扣掉全部已標註物件後剩下的高斯),尚未補洞。",
-    modelUrl: "/models/interiorgs839920-objects/background.ply",
+    modelUrl: `${BACKEND_ORIGIN}/storage/models/interiorgs839920-objects/background.ply`,
     originSceneId: "scene-interiorgs839920",
   };
 
@@ -66,7 +67,7 @@ function interiorgsObjects(): ObjectSeed[] {
     id: `interiorgs839920-${insId}`,
     name: `${label} ${insId}`,
     description: `InteriorGS 場景 0001_839920 的標註物件(ground truth 3D 包圍盒裁切,label=${label},${fmt(gaussianCount)} 顆高斯)。`,
-    modelUrl: `/models/interiorgs839920-objects/${file}`,
+    modelUrl: `${BACKEND_ORIGIN}/storage/models/interiorgs839920-objects/${file}`,
     originSceneId: "scene-interiorgs839920",
   }));
 
@@ -102,8 +103,6 @@ async function main() {
       );
     }
 
-    // 每個物件在自己原本所屬的場景裡預先擺一份 identity transform 的副本,
-    // 對齊前端 stores/sceneObjects.ts 原本的 seed 邏輯,接上後端後畫面看起來一致。
     for (const obj of objects) {
       await pool.query(
         `INSERT INTO scene_object_instances (id, scene_id, model_id, label) VALUES ($1, $2, $3, $4)`,

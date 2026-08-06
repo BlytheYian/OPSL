@@ -4,6 +4,7 @@ import path from "path";
 import fs from "fs";
 import { pool } from "../db";
 import { requireAuth } from "../auth";
+import { embedImageFile } from "../clip/imageEmbed";
 
 /**
  * 模型庫瀏覽——取代前端 stores/library.ts 原本硬編的 allScenes/allObjects 陣列。
@@ -348,6 +349,13 @@ libraryRouter.post(
       url,
     ]);
     if (result.rowCount === 0) return res.status(404).json({ error: "找不到這個物件" });
+
+    const filePath = req.file.path;
+    const objectId = req.params.id;
+    embedImageFile(filePath)
+      .then((embedding) => pool.query(`UPDATE library_objects SET clip_embedding = $2 WHERE id = $1`, [objectId, embedding]))
+      .catch((err) => console.error(`[clip] ${objectId} embedding 失敗:`, err instanceof Error ? err.message : err));
+
     res.json({ thumbnailUrl: url });
   }
 );

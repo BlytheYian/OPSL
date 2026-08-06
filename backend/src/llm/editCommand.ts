@@ -80,6 +80,8 @@ const VISION_SYSTEM_PROMPT = `你在看一張 3D 場景編輯器目前畫面的�
 - 指令是「把 A 換成 B」「A 換一個 B 好了」這種替換說法(例如「把單人沙發換成雙人沙發」)時,要找
   的是畫面裡現有的 A(單人沙發),不是 B(雙人沙發)——B 是使用者想換成的新描述,畫面裡通常根本
   沒有這個東西,不要因為指令提到 B 就去找長得像 B 的物件。
+- 指令是「放一個 A 在 B 旁邊/附近」這種新增物件的說法時,要找的是現有的 B(放置的參考位置),
+  不是要新增的 A(A 尚未在場景裡)。找不到合適的參考物件,回傳空陣列 []。
 - 找不到符合指令描述的物件,回傳空陣列 []。`;
 
 const ACTION_SYSTEM_PROMPT = `你是一個 3D 場景編輯助手,做純文字的結構化資料轉換——使用者會用中文
@@ -110,6 +112,10 @@ const ACTION_SYSTEM_PROMPT = `你是一個 3D 場景編輯助手,做純文字的
   把這個物件從場景裡拿掉。
 - "replace":使用者說「把 A 換成 B」「A 換一個 B 好了」「這個我想換成別的」這類明確表示「拿掉
   原本這個,改放一個不同東西」的語氣——不是調整原本這個物件,是要用另一個物件取代它。
+- "place":使用者說「放一個」「加一個」「擺一個」「增加一個」這類在場景中新增全新物件的語氣——
+  不是修改現有物件,是要在場景裡加進一個目前不存在的東西。placementQuery 填「要放什麼物件」的
+  中文描述(例如「在走道旁放一個扶手」→ placementQuery 填 "扶手");positionDelta 填相對於指令
+  提到的參考物件的偏移量(鏡頭相對座標,同 adjust 的格式),沒有參考物件填 null。
 
 action 是 "adjust" 時,positionDelta/rotationDelta/scaleMultiplier/color/reset* 欄位照下面規則
 填;action 是其他三種時,這幾個欄位全部填 null/false。action 是 "replace" 時,replacementQuery
@@ -175,7 +181,7 @@ const VISION_JSON_SCHEMA = {
 const ACTION_JSON_SCHEMA = {
   type: "object",
   properties: {
-    action: { type: "string", enum: ["adjust", "hide", "delete", "replace"] },
+    action: { type: "string", enum: ["adjust", "hide", "delete", "replace", "place"] },
     positionDelta: { type: ["array", "null"], items: { type: "number" }, minItems: 3, maxItems: 3 },
     rotationDelta: { type: ["array", "null"], items: { type: "number" }, minItems: 3, maxItems: 3 },
     scaleMultiplier: { type: ["array", "null"], items: { type: "number" }, minItems: 3, maxItems: 3 },
@@ -185,6 +191,7 @@ const ACTION_JSON_SCHEMA = {
     resetScale: { type: "boolean" },
     resetColor: { type: "boolean" },
     replacementQuery: { type: ["string", "null"] },
+    placementQuery: { type: ["string", "null"] },
     reasoning: { type: ["string", "null"] },
   },
   required: [
@@ -198,6 +205,7 @@ const ACTION_JSON_SCHEMA = {
     "resetScale",
     "resetColor",
     "replacementQuery",
+    "placementQuery",
     "reasoning",
   ],
 };
@@ -342,7 +350,7 @@ async function identifyInstances(
 }
 
 interface ActionResult {
-  action: "adjust" | "hide" | "delete" | "replace";
+  action: "adjust" | "hide" | "delete" | "replace" | "place";
   positionDelta: [number, number, number] | null;
   rotationDelta: [number, number, number] | null;
   scaleMultiplier: [number, number, number] | null;
@@ -352,6 +360,7 @@ interface ActionResult {
   resetScale: boolean;
   resetColor: boolean;
   replacementQuery: string | null;
+  placementQuery: string | null;
   reasoning: string | null;
 }
 
@@ -387,6 +396,7 @@ async function extractAction(command: string): Promise<ActionResult> {
     resetScale: result.data.resetScale ?? false,
     resetColor: result.data.resetColor ?? false,
     replacementQuery: result.data.replacementQuery ?? null,
+    placementQuery: result.data.placementQuery ?? null,
     reasoning: result.data.reasoning ?? null,
   };
 }
@@ -411,25 +421,51 @@ async function resolveOneCommand(
   previousContext: PreviousEditContext | null,
   cameraAxes: CameraAxes | null
 ): Promise<ResolvedEditAction> {
+  const useClipMatcher = process.env.EDIT_COMMAND_MATCHER === "clip";
+
+  const action = await withRetry(() => extractAction(item.text));
+
+  if (action.action === "place") {
+    const referenceInstances = await withRetry(() =>
+      identifyInstances(item.text, imageBase64, visible)
+    ).catch(() => [] as MatchedInstance[]);
+    const worldOffset =
+      action.positionDelta ? cameraRelativeToWorld(action.positionDelta, cameraAxes) : null;
+    const refNote = referenceInstances.length > 0
+      ? `以「${referenceInstances[0].label}」為參考位置。`
+      : "";
+    return {
+      instanceIds: referenceInstances.map((m) => m.id),
+      action: "place",
+      positionDelta: worldOffset,
+      rotationDelta: null,
+      scaleMultiplier: null,
+      color: null,
+      resetPosition: false,
+      resetRotation: false,
+      resetScale: false,
+      resetColor: false,
+      replacementQuery: null,
+      placementQuery: action.placementQuery ?? null,
+      reasoning: refNote + (action.reasoning ?? ""),
+    };
+  }
+
   let reusePrevious = item.referencesPrevious && !!previousContext?.instances.length;
   if (reusePrevious) {
-    // 覆核切分階段的判斷,見 hasIndependentDescription 宣告處的說明——只有覆核也同意「真的沒有
-    // 描述物件本身」才真正沿用歷史,不然強制重新跑一次比對。
     const hasDescription = await withRetry(() => hasIndependentDescription(item.text));
     if (hasDescription) reusePrevious = false;
   }
-  const useClipMatcher = process.env.EDIT_COMMAND_MATCHER === "clip";
 
-  const [matchedInstances, action] = await Promise.all([
+  const matchedInstances = await (
     reusePrevious
       ? Promise.resolve(previousContext!.instances)
       : withRetry(() =>
           useClipMatcher
             ? identifyInstancesClip(item.text, visible, previousContext)
             : identifyInstances(item.text, imageBase64, visible)
-        ),
-    withRetry(() => extractAction(item.text)),
-  ]);
+        )
+  );
 
   const matchedNote = reusePrevious
     ? `沿用上一輪的物件(${matchedInstances.map((m) => m.label).join("、")})。`
@@ -452,6 +488,7 @@ async function resolveOneCommand(
     resetScale: action.action === "adjust" && action.resetScale,
     resetColor: action.action === "adjust" && action.resetColor,
     replacementQuery: action.action === "replace" ? action.replacementQuery : null,
+    placementQuery: null,
     reasoning: matchedNote + (action.reasoning ?? ""),
   };
 }
