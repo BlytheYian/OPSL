@@ -9,7 +9,38 @@
 // 每一幀 GSplatDirector.updateStreaming() 還是會拿它們出來用,存取已經被移除的 camera 元件就會拋出
 // 「Cannot read properties of undefined (reading 'fov')」這類例外。相機重複使用同一個實體就不會累積。
 export type GizmoMode = 'translate' | 'rotate' | 'scale'
+
+let compareAppData: { pc: any; app: any; canvas: HTMLCanvasElement; camera: any } | null = null
+
+export async function getCompareGSplatApp() {
+  if (!compareAppData) {
+    const { pc } = await getSharedGSplatApp()
+    const canvas = document.createElement('canvas')
+    const app = new pc.Application(canvas, {
+      graphicsDeviceOptions: { antialias: false, preserveDrawingBuffer: true },
+    })
+    app.setCanvasFillMode(pc.FILLMODE_NONE)
+    app.setCanvasResolution(pc.RESOLUTION_AUTO)
+    app.start()
+
+    const sun = new pc.Entity('CmpSun')
+    sun.addComponent('light', { type: 'directional', intensity: 1.2 })
+    sun.setEulerAngles(45, 30, 0)
+    app.root.addChild(sun)
+    app.scene.ambientLight = new pc.Color(0.35, 0.35, 0.35)
+
+    const camera = new pc.Entity('CmpCamera')
+    camera.setPosition(0, 2, 5)
+    camera.addComponent('camera')
+    app.root.addChild(camera)
+
+    compareAppData = { pc, app, canvas, camera }
+  }
+  return compareAppData
+}
 export type Gizmos = Record<GizmoMode, any>
+
+export const MAX_RISK_MARKERS = 20
 
 let appPromise: Promise<{
   pc: any
@@ -30,6 +61,7 @@ let appPromise: Promise<{
   previewCamera: any
   gizmos: Gizmos
   highlightLines: any[]
+  riskMarkerLines: any[]
 }> | null = null
 
 export function getSharedGSplatApp() {
@@ -134,7 +166,20 @@ export function getSharedGSplatApp() {
         line.entity.enabled = false
       }
 
-      return { pc, app, canvas, editorCamera, previewCamera, gizmos, highlightLines }
+      // 風險標記外框——跟上面選取外框同一招(MeshLine 畫圓柱體模擬線段),但風險標記可能同時
+      // 有好幾個,不能像選取外框只共用 12 條線、每次重畫。固定配一個 MAX_RISK_MARKERS 份的池,
+      // 用不到的就 enabled=false 收著,不用每次顯示都動態建立/銷毀 entity(MeshLine 建構子會
+      // new 一個自己的 ShaderMaterial,動態建立/銷毀量一多就是逐幀配置的成本)。
+      const riskMarkerLines = Array.from(
+        { length: MAX_RISK_MARKERS * 12 },
+        () => new gizmoModule.MeshLine(app, gizmoLayer, { thickness: 0.4 })
+      )
+      for (const line of riskMarkerLines) {
+        app.root.addChild(line.entity)
+        line.entity.enabled = false
+      }
+
+      return { pc, app, canvas, editorCamera, previewCamera, gizmos, highlightLines, riskMarkerLines }
     })()
   }
   return appPromise

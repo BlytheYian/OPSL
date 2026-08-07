@@ -3,10 +3,14 @@ import { computed } from 'vue'
 import type { LibraryItem } from '../stores/library'
 import { formatRelativeTime } from '../lib/formatTime'
 
-const props = defineProps<{ item: LibraryItem }>()
+const props = defineProps<{ item: LibraryItem; size?: [number, number, number] }>()
 const emit = defineEmits<{ open: [] }>()
 
 const timeLabel = computed(() => formatRelativeTime(props.item.createdAt))
+
+function fmtSize(s: [number, number, number]) {
+  return `${s[0].toFixed(2)}m × ${s[1].toFixed(2)}m × ${s[2].toFixed(2)}m`
+}
 
 function handleClick() {
   if (props.item.status === 'ready') emit('open')
@@ -31,6 +35,7 @@ function handleClick() {
     </div>
     <div class="card__meta">
       <p class="card__name">{{ item.name }}</p>
+      <p v-if="size" class="card__size">{{ fmtSize(size) }}</p>
       <p class="card__time">{{ timeLabel }}</p>
     </div>
   </button>
@@ -125,6 +130,12 @@ function handleClick() {
   font-size: 0.95rem;
   font-weight: 700;
   color: var(--color-ink);
+}
+
+.card__size {
+  margin: 0;
+  font-size: 0.72rem;
+  color: var(--color-ink-soft);
 }
 
 .card__time {

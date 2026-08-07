@@ -29,6 +29,7 @@ interface EditCommandResult {
   instances: SceneObjectInstance[]
   removedIds: string[]
   added: SceneObjectInstance[]
+  intendedPositions: Record<string, [number, number, number]>
   reasoning: string | null
 }
 
@@ -90,6 +91,26 @@ export interface SceneVersion {
   revertedFromVersionId: number | null
 }
 
+export interface RiskAssetSuggestion {
+  id: string
+  name: string
+}
+
+export interface RiskMarker {
+  id?: number
+  riskType: '門檻' | '家具邊角' | '地面高低差' | '走道障礙'
+  bboxMin: Vec3
+  bboxMax: Vec3
+  suggestedAssets: RiskAssetSuggestion[]
+}
+
+export interface RouteDetectionResult {
+  floorY: number
+  cellSize: number
+  freeCells: [number, number][]
+  narrowCells: [number, number][]
+}
+
 export const useSceneObjectsStore = defineStore('sceneObjects', {
   state: () => ({
     instances: [] as SceneObjectInstance[],
@@ -122,6 +143,31 @@ export const useSceneObjectsStore = defineStore('sceneObjects', {
     availableModelsForScene() {
       const library = useLibraryStore()
       return () => library.objects
+    },
+    snapshotAtIndex: (state) => (sceneId: string, targetIndex: number): InstanceSnapshot[] => {
+      const snap = new Map<string, InstanceSnapshot>()
+      for (const i of state.instances.filter((i) => i.sceneId === sceneId)) {
+        snap.set(i.id, { id: i.id, sceneId: i.sceneId, modelId: i.modelId, label: i.label, hidden: i.hidden, position: [...i.position] as Vec3, rotation: [...i.rotation] as Vec3, scale: [...i.scale] as Vec3, color: i.color })
+      }
+      const currentIndex = state.undoStack.length
+      if (targetIndex <= currentIndex) {
+        for (let idx = currentIndex - 1; idx >= targetIndex; idx--) {
+          const entry = state.undoStack[idx]
+          if (entry.kind === 'add') snap.delete(entry.instance.id)
+          else if (entry.kind === 'remove') snap.set(entry.instance.id, { ...entry.instance, position: [...entry.instance.position] as Vec3, rotation: [...entry.instance.rotation] as Vec3, scale: [...entry.instance.scale] as Vec3 })
+          else for (const b of entry.before) snap.set(b.id, { ...b, position: [...b.position] as Vec3, rotation: [...b.rotation] as Vec3, scale: [...b.scale] as Vec3 })
+        }
+      } else {
+        const redoEntries = [...state.redoStack].reverse()
+        for (let idx = 0; idx < targetIndex - currentIndex; idx++) {
+          const entry = redoEntries[idx]
+          if (!entry) break
+          if (entry.kind === 'add') snap.set(entry.instance.id, { ...entry.instance, position: [...entry.instance.position] as Vec3, rotation: [...entry.instance.rotation] as Vec3, scale: [...entry.instance.scale] as Vec3 })
+          else if (entry.kind === 'remove') snap.delete(entry.instance.id)
+          else for (const a of entry.after) snap.set(a.id, { ...a, position: [...a.position] as Vec3, rotation: [...a.rotation] as Vec3, scale: [...a.scale] as Vec3 })
+        }
+      }
+      return Array.from(snap.values())
     },
   },
   actions: {
@@ -162,6 +208,15 @@ export const useSceneObjectsStore = defineStore('sceneObjects', {
       if (!vec3Equal(transform.scale, instance.scale)) parts.push('縮放')
       const label = parts.length ? parts.join('/') : '調整位置/旋轉/縮放'
       await this.patchInstance(instanceId, transform, label)
+    },
+    async silentMoveInstance(instanceId: string, position: Vec3) {
+      const instance = this.instances.find((i) => i.id === instanceId)
+      if (!instance) return
+      const updated = await api.patch<SceneObjectInstance>(
+        `/scenes/${encodeURIComponent(instance.sceneId)}/objects/${encodeURIComponent(instanceId)}`,
+        { position }
+      )
+      Object.assign(instance, updated)
     },
     async patchInstance(instanceId: string, payload: UpdateInstancePayload, actionLabel: string) {
       const instance = this.instances.find((i) => i.id === instanceId)
@@ -335,23 +390,63 @@ export const useSceneObjectsStore = defineStore('sceneObjects', {
         updated: after.filter((i) => beforeIds.has(i.id)),
       }
     },
-    clearHistory() {
+    clearHistory(sceneId?: string) {
       this.undoStack = []
       this.redoStack = []
+      if (sceneId) delete this.pendingCommandsBySceneId[sceneId]
     },
 
+    async fetchVersionInstances(sceneId: string, versionId: number): Promise<InstanceSnapshot[]> {
+      return api.get<InstanceSnapshot[]>(`/scenes/${encodeURIComponent(sceneId)}/versions/${versionId}/instances`)
+    },
     async fetchVersions(sceneId: string) {
       const versions = await api.get<SceneVersion[]>(`/scenes/${encodeURIComponent(sceneId)}/versions`)
       this.versionsBySceneId[sceneId] = versions
     },
+    async fetchRisks(sceneId: string, versionId: number): Promise<RiskMarker[]> {
+      return api.get<RiskMarker[]>(
+        `/scenes/${encodeURIComponent(sceneId)}/versions/${versionId}/risks`
+      )
+    },
+    async checkRisksNow(sceneId: string): Promise<RiskMarker[]> {
+      return api.post<RiskMarker[]>(`/scenes/${encodeURIComponent(sceneId)}/risk-check`, {})
+    },
+    async fetchFloorDetection(
+      sceneId: string
+    ): Promise<{ y: number; cellSize: number; cells: [number, number][] } | null> {
+      const result = await api.get<{ bounds: { y: number; cellSize: number; cells: [number, number][] } | null }>(
+        `/scenes/${encodeURIComponent(sceneId)}/floor-detection`
+      )
+      return result.bounds
+    },
+    async detectRoute(sceneId: string): Promise<RouteDetectionResult | null> {
+      return api.post<RouteDetectionResult | null>(
+        `/scenes/${encodeURIComponent(sceneId)}/route-detection`,
+        {}
+      )
+    },
     async createVersion(sceneId: string) {
-      const sourceCommands = this.pendingCommandsBySceneId[sceneId] ?? []
       const version = await api.post<SceneVersion>(`/scenes/${encodeURIComponent(sceneId)}/versions`, {
-        sourceCommands,
+        sourceCommands: [],
       })
       this.versionsBySceneId[sceneId] = [version, ...(this.versionsBySceneId[sceneId] ?? [])]
-      delete this.pendingCommandsBySceneId[sceneId]
       return version
+    },
+    async patchVersionCommands(sceneId: string, versionId: number, sourceCommands: string[]) {
+      await api.patch(
+        `/scenes/${encodeURIComponent(sceneId)}/versions/${versionId}/commands`,
+        { sourceCommands }
+      )
+      const list = this.versionsBySceneId[sceneId]
+      if (list) {
+        const v = list.find((v) => v.id === versionId)
+        if (v) v.sourceCommands = sourceCommands
+      }
+    },
+    async deleteVersion(sceneId: string, versionId: number) {
+      await api.delete(`/scenes/${encodeURIComponent(sceneId)}/versions/${versionId}`)
+      const list = this.versionsBySceneId[sceneId]
+      if (list) this.versionsBySceneId[sceneId] = list.filter((v) => v.id !== versionId)
     },
     async restoreVersion(sceneId: string, versionId: number): Promise<HistoryChange> {
       const before = this.instancesForScene(sceneId)

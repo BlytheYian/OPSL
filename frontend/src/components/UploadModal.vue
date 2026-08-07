@@ -17,6 +17,13 @@ const uploading = ref(false)
 const uploadError = ref('')
 const uploadedName = ref('')
 
+const shareCodeInput = ref('')
+const shareCodeApplied = ref(false)
+function applyShareCode() {
+  if (!shareCodeInput.value.trim()) return
+  shareCodeApplied.value = true
+}
+
 const KIND_ACCEPT: Record<UploadKind, string> = {
   object: '.ply,.glb',
   scene: '.usdz,.usd,.obj,.fbx',
@@ -68,6 +75,8 @@ function reset() {
   chosenFile.value = null
   uploadError.value = ''
   uploadedName.value = ''
+  shareCodeInput.value = ''
+  shareCodeApplied.value = false
   if (fileInputRef.value) fileInputRef.value.value = ''
 }
 
@@ -86,6 +95,22 @@ function handleClose() {
 
         <template v-if="!chosenKind || (!chosenFile && !uploadedName)">
           <p class="upload-modal__hint">選擇要上傳的是單一模型元件,還是包含多個模型的場景檔案</p>
+          <div class="upload-modal__share-code">
+            <label class="upload-modal__share-code-label">輸入分享碼</label>
+            <div class="upload-modal__share-code-row">
+              <input
+                v-model="shareCodeInput"
+                class="upload-modal__share-code-input"
+                type="text"
+                placeholder="例：demo-a3f8c2"
+                :disabled="shareCodeApplied"
+                @keydown.enter="applyShareCode"
+              />
+              <button class="upload-modal__share-code-btn" type="button" :disabled="shareCodeApplied || !shareCodeInput.trim()" @click="applyShareCode">套用</button>
+            </div>
+            <p v-if="shareCodeApplied" class="upload-modal__share-code-ok">✓ 正在匯入「{{ shareCodeInput.trim() }}」的分享場景…</p>
+          </div>
+          <div class="upload-modal__divider"><span>或上傳檔案</span></div>
           <div class="upload-modal__choices">
             <button class="upload-modal__choice" type="button" @click="pickKind('object')">
               <span class="upload-modal__choice-title">模型元件</span>
@@ -284,6 +309,64 @@ function handleClose() {
   color: #b3413a;
 }
 
+.upload-modal__share-code {
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.upload-modal__share-code-label {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: var(--color-ink);
+}
+.upload-modal__share-code-row {
+  display: flex;
+  gap: 0.5rem;
+}
+.upload-modal__share-code-input {
+  flex: 1;
+  border: 1px solid var(--color-line);
+  border-radius: calc(var(--radius) * 0.6);
+  padding: 0.45rem 0.7rem;
+  font-family: monospace;
+  font-size: 0.88rem;
+  background: var(--color-surface);
+  color: var(--color-ink);
+  outline: none;
+}
+.upload-modal__share-code-input:focus { border-color: var(--color-sage); }
+.upload-modal__share-code-input:disabled { opacity: 0.6; }
+.upload-modal__share-code-btn {
+  flex-shrink: 0;
+  border: none;
+  border-radius: calc(var(--radius) * 0.6);
+  padding: 0.45rem 1rem;
+  background: var(--color-sage);
+  color: #fff;
+  font-weight: 700;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+.upload-modal__share-code-btn:disabled { opacity: 0.45; cursor: not-allowed; }
+.upload-modal__share-code-ok {
+  margin: 0;
+  font-size: 0.78rem;
+  color: var(--color-sage);
+}
+.upload-modal__divider {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  color: var(--color-ink-soft);
+  font-size: 0.78rem;
+}
+.upload-modal__divider::before,
+.upload-modal__divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--color-line);
+}
 .upload-modal__file-input {
   display: none;
 }

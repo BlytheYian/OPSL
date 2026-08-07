@@ -12,9 +12,11 @@ interface QueueItem {
   id: string
   src: string[]
   ids: (string | null)[]
-  transforms: ({ position: Vec3; rotation: Vec3; scale: Vec3 } | null)[]
+  transforms?: ({ position: Vec3; rotation: Vec3; scale: Vec3 } | null)[]
   dataRotations: (Vec3 | null)[]
 }
+
+const props = defineProps<{ paused?: boolean }>()
 
 const queue = ref<QueueItem[]>([])
 const currentIndex = ref(-1)
@@ -56,7 +58,6 @@ async function buildQueue() {
       id: obj.id,
       src: [obj.modelUrl],
       ids: [obj.id],
-      transforms: [null],
       dataRotations: [upAxisFixFor(obj.id, obj.modelUrl)],
     })
   }
@@ -66,8 +67,7 @@ async function buildQueue() {
 async function onViewerLoaded() {
   const item = currentItem.value
   if (!item) return
-  await new Promise((resolve) => setTimeout(resolve, 300))
-  const blob = await viewerRef.value?.captureCurrentView().catch(() => null)
+  const blob = await viewerRef.value?.captureThumbnail().catch(() => null)
   if (blob) await library.saveThumbnail(item.kind, item.id, blob).catch(() => {})
   resolveCurrent?.()
   resolveCurrent = null
@@ -80,12 +80,11 @@ function onViewerError() {
 onMounted(async () => {
   await buildQueue()
   for (let i = 0; i < queue.value.length; i++) {
+    while (props.paused) await new Promise((resolve) => setTimeout(resolve, 300))
     currentIndex.value = i
     await nextTick()
-    await new Promise<void>((resolve) => {
-      resolveCurrent = resolve
-    })
-    await new Promise((resolve) => setTimeout(resolve, 1500))
+    await new Promise<void>((resolve) => { resolveCurrent = resolve })
+    await new Promise((resolve) => setTimeout(resolve, 500))
   }
   currentIndex.value = -1
 })

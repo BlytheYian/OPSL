@@ -31,6 +31,7 @@ services:
       OLLAMA_URL: ${OLLAMA_URL:-http://host.docker.internal:11434}
       OLLAMA_MODEL: ${OLLAMA_MODEL:-gemma4:E4B}
       EDIT_COMMAND_MATCHER: ${EDIT_COMMAND_MATCHER:-}
+      BACKEND_ORIGIN: ${BACKEND_ORIGIN:-http://localhost:3000}
     depends_on:
       db:
         condition: service_healthy

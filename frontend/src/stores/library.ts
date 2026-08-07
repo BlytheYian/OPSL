@@ -45,6 +45,7 @@ export const useLibraryStore = defineStore('library', {
     objectsLoaded: false,
     catalogScenesLoaded: false,
     catalogObjectsLoaded: false,
+    objectSizes: {} as Record<string, [number, number, number]>,
   }),
   actions: {
     async fetchScenes() {

@@ -1,6 +1,14 @@
 <script setup lang="ts">
 import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { claimCanvas, getSharedGSplatApp, releaseCanvas, setGizmoTarget, type GizmoMode, type ViewerSession } from '../lib/gsplatApp'
+import {
+  claimCanvas,
+  getSharedGSplatApp,
+  releaseCanvas,
+  setGizmoTarget,
+  MAX_RISK_MARKERS,
+  type GizmoMode,
+  type ViewerSession,
+} from '../lib/gsplatApp'
 import { useSceneObjectsStore, type Vec3 } from '../stores/sceneObjects'
 
 const sceneObjects = useSceneObjectsStore()
@@ -120,8 +128,10 @@ const emit = defineEmits<{
   loaded: []
   error: [message: string]
   select: [id: string | null]
-  /** 載入百分比(涵蓋檔案下載 + LOD 細節收斂兩階段),外層想自己畫載入提示時可以用這個 */
   progress: [percent: number]
+  'risk-pick': [index: number | null]
+  'camera-mode': [mode: string]
+  'request-tps-char': []
 }>()
 
 const wrapperRef = ref<HTMLDivElement | null>(null)
@@ -153,6 +163,7 @@ function onGsplatFrameReady(_camera: unknown, _layer: unknown, _ready: boolean, 
 }
 
 let resizeObserver: ResizeObserver | null = null
+let resizeTimer: ReturnType<typeof setTimeout> | null = null
 let sharedCanvas: HTMLCanvasElement | null = null
 let isActive = true
 
@@ -161,12 +172,21 @@ let appRef: any = null
 let cameraRef: any = null
 let gizmosRef: any = null
 let highlightLinesRef: any[] = []
+let riskMarkerLinesRef: any[] = []
+let riskMarkersForPick: { bboxMin: Vec3; bboxMax: Vec3 }[] = []
+let riskGizmoEntity: any = null
+let riskGizmoOnUpdate: ((bbox: { bboxMin: Vec3; bboxMax: Vec3 }) => void) | null = null
+let debugGroundPlaneEntity: any = null
 let entitiesById = new Map<string, { root: any; splat: any; kind: 'gsplat' | 'mesh' }>()
 let allLoadedEntities: { root: any; splat: any; kind: 'gsplat' | 'mesh' }[] = []
 
 const session: ViewerSession = { wrapper: null as unknown as HTMLElement, entities: new Set(), active: false, camera: null }
 
 let highlightedEntity: any = null
+let floorEntityRef: any = null
+let routeFreeEntityRef: any = null
+let routeNarrowEntityRef: any = null
+let pathArrowEntities: any[] = []
 let needsInitialFraming = false
 let initialFramingDone = false
 const BOX_EDGES: Array<[[number, number, number], [number, number, number]]> = [
@@ -174,6 +194,7 @@ const BOX_EDGES: Array<[[number, number, number], [number, number, number]]> = [
   [[0, 1, 0], [1, 1, 0]], [[1, 1, 0], [1, 1, 1]], [[1, 1, 1], [0, 1, 1]], [[0, 1, 1], [0, 1, 0]],
   [[0, 0, 0], [0, 1, 0]], [[1, 0, 0], [1, 1, 0]], [[1, 0, 1], [1, 1, 1]], [[0, 0, 1], [0, 1, 1]],
 ]
+const RISK_MARKER_LINE_THICKNESS = 0.02
 function onAppUpdate() {
   if (!session.active) return
 
@@ -205,6 +226,10 @@ function onAppUpdate() {
           const position = new pc.Vec3(center.x, center.y, center.z + distance)
           camera.script.cameraControls.reset(center, position)
           initialFramingDone = true
+          fpsHeightBase = center.y + 1
+          fpsHeight.value = fpsHeightBase
+          fpsHeightMin.value = fpsHeightBase - 3
+          fpsHeightMax.value = fpsHeightBase + 8
         }
       }
     }
@@ -283,8 +308,37 @@ function onCanvasPointerUp(e: PointerEvent) {
     }
   }
   emit('select', closestId)
+
+  if (riskMarkersForPick.length) {
+    let pickedRisk: number | null = null
+    let closestRiskDist = Infinity
+    for (let i = 0; i < riskMarkersForPick.length; i++) {
+      const { bboxMin, bboxMax } = riskMarkersForPick[i]
+      const aabb = new pc.BoundingBox(
+        new pc.Vec3((bboxMin[0] + bboxMax[0]) / 2, (bboxMin[1] + bboxMax[1]) / 2, (bboxMin[2] + bboxMax[2]) / 2),
+        new pc.Vec3((bboxMax[0] - bboxMin[0]) / 2, (bboxMax[1] - bboxMin[1]) / 2, (bboxMax[2] - bboxMin[2]) / 2),
+      )
+      if (aabb.intersectsRay(ray, hitPoint)) {
+        const dist = hitPoint.distance(near)
+        if (dist < closestRiskDist) { closestRiskDist = dist; pickedRisk = i }
+      }
+    }
+    emit('risk-pick', pickedRisk)
+  }
 }
+function detachRiskGizmoInternal() {
+  if (!riskGizmoEntity) return
+  session.entities.delete(riskGizmoEntity)
+  riskGizmoEntity.destroy()
+  riskGizmoEntity = null
+  riskGizmoOnUpdate = null
+}
+
 function applyGizmoState() {
+  if (riskGizmoEntity) {
+    if (gizmosRef) setGizmoTarget(gizmosRef, props.gizmoMode ?? null, riskGizmoEntity)
+    return
+  }
   const entity = props.selectedId ? entitiesById.get(props.selectedId) ?? null : null
   highlightedEntity = entity
   if (!gizmosRef) return
@@ -302,6 +356,15 @@ function vec3Unchanged(a: Vec3, b: Vec3): boolean {
 }
 
 function persistSelectedTransform() {
+  if (riskGizmoEntity && riskGizmoOnUpdate) {
+    const pos = riskGizmoEntity.getPosition()
+    const s = riskGizmoEntity.getLocalScale()
+    riskGizmoOnUpdate({
+      bboxMin: [pos.x - s.x / 2, pos.y - s.y / 2, pos.z - s.z / 2],
+      bboxMax: [pos.x + s.x / 2, pos.y + s.y / 2, pos.z + s.z / 2],
+    })
+    return
+  }
   if (!session.active || !props.selectedId) return
   const entry = entitiesById.get(props.selectedId)
   if (!entry) return
@@ -328,7 +391,7 @@ onMounted(async () => {
   const wrapper = wrapperRef.value
   session.wrapper = wrapper
 
-  const { pc, app, canvas, editorCamera, previewCamera, gizmos, highlightLines } = await getSharedGSplatApp()
+  const { pc, app, canvas, editorCamera, previewCamera, gizmos, highlightLines, riskMarkerLines } = await getSharedGSplatApp()
   if (!isActive) return
   pcRef = pc
   appRef = app
@@ -338,11 +401,15 @@ onMounted(async () => {
   session.camera = camera
   gizmosRef = gizmos
   highlightLinesRef = highlightLines
+  riskMarkerLinesRef = riskMarkerLines
 
   sharedCanvas = canvas
   const resize = () => {
-    const { width, height } = wrapper.getBoundingClientRect()
-    app.resizeCanvas(Math.max(1, Math.round(width)), Math.max(1, Math.round(height)))
+    if (resizeTimer) clearTimeout(resizeTimer)
+    resizeTimer = setTimeout(() => {
+      const { width, height } = wrapper.getBoundingClientRect()
+      app.resizeCanvas(Math.max(1, Math.round(width)), Math.max(1, Math.round(height)))
+    }, 200)
   }
   session.resize = resize
 
@@ -449,6 +516,7 @@ onMounted(async () => {
     for (const i of pendingIndices) addEntityForIndex(i)
     loading.value = false
     loadStage.value = 'refining'
+    if (allLoadedEntities.every((e) => e.kind !== 'gsplat')) loadStage.value = 'done'
 
     emit('loaded')
   } catch (err) {
@@ -472,6 +540,211 @@ watch(
   },
   { deep: true },
 )
+
+const cameraMode = ref<'orbit' | 'fps' | 'tps' | 'top'>('orbit')
+
+let tpsCharEntity: any = null
+let tpsCharSplat: any = null
+let tpsCharKind: 'gsplat' | 'mesh' = 'mesh'
+let tpsCharHalfH = 0
+const hasTpsChar = ref(false)
+let tpsYaw = 0
+let tpsPitch = 0.35
+let TPS_DIST = 2.8
+const TPS_ARM_UP = 0.6
+const tpsKeys = new Set<string>()
+let tpsDragging = false, tpsLastX = 0, tpsLastY = 0
+
+function onTpsKeyDown(e: KeyboardEvent) { tpsKeys.add(e.code) }
+function onTpsKeyUp(e: KeyboardEvent) { tpsKeys.delete(e.code) }
+function onTpsPointerDown(e: PointerEvent) {
+  tpsDragging = true; tpsLastX = e.clientX; tpsLastY = e.clientY
+  ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
+}
+function onTpsPointerMove(e: PointerEvent) {
+  if (!tpsDragging) return
+  tpsYaw -= (e.clientX - tpsLastX) * 0.003
+  tpsPitch = Math.max(0.1, Math.min(1.2, tpsPitch + (e.clientY - tpsLastY) * 0.003))
+  tpsLastX = e.clientX; tpsLastY = e.clientY
+}
+function onTpsPointerUp() { tpsDragging = false }
+function onTpsWheel(e: WheelEvent) {
+  e.preventDefault()
+  TPS_DIST = Math.max(0.5, Math.min(15, TPS_DIST * (1 + e.deltaY * 0.001)))
+}
+function destroyTpsChar() {
+  if (tpsCharEntity) {
+    session.entities.delete(tpsCharEntity)
+    tpsCharEntity.destroy()
+    tpsCharEntity = null
+    tpsCharSplat = null
+  }
+  hasTpsChar.value = false
+}
+
+function onTpsUpdate(dt: number) {
+  if (!cameraRef || cameraMode.value !== 'tps' || !tpsCharEntity) return
+  const speed = 3 * dt
+  let dx = 0, dz = 0
+  if (tpsKeys.has('KeyW') || tpsKeys.has('ArrowUp'))    { dx -= Math.sin(tpsYaw); dz -= Math.cos(tpsYaw) }
+  if (tpsKeys.has('KeyS') || tpsKeys.has('ArrowDown'))  { dx += Math.sin(tpsYaw); dz += Math.cos(tpsYaw) }
+  if (tpsKeys.has('KeyA') || tpsKeys.has('ArrowLeft'))  { dx -= Math.cos(tpsYaw); dz += Math.sin(tpsYaw) }
+  if (tpsKeys.has('KeyD') || tpsKeys.has('ArrowRight')) { dx += Math.cos(tpsYaw); dz -= Math.sin(tpsYaw) }
+  const charPos = tpsCharEntity.getPosition()
+  if (dx !== 0 || dz !== 0) {
+    tpsCharEntity.setPosition(charPos.x + dx * speed, charPos.y, charPos.z + dz * speed)
+  }
+  tpsCharEntity.setLocalEulerAngles(0, tpsYaw * 180 / Math.PI + 180, 0)
+  const p = tpsCharEntity.getPosition()
+  const armBack = TPS_DIST * Math.cos(tpsPitch)
+  const armUp = TPS_DIST * Math.sin(tpsPitch)
+  const camX = p.x + Math.sin(tpsYaw) * armBack
+  const camY = p.y + tpsCharHalfH + TPS_ARM_UP + armUp
+  const camZ = p.z + Math.cos(tpsYaw) * armBack
+  cameraRef.setPosition(camX, camY, camZ)
+  const pc = pcRef
+  if (pc) {
+    const target = new pc.Vec3(p.x, p.y + tpsCharHalfH * 0.6, p.z)
+    const eye = new pc.Vec3(camX, camY, camZ)
+    const mat = new pc.Mat4().setLookAt(eye, target, pc.Vec3.UP)
+    const rot = new pc.Quat().setFromMat4(mat)
+    cameraRef.setRotation(rot)
+  }
+}
+
+const fpsKeys = new Set<string>()
+let fpsDragging = false, fpsLastX = 0, fpsLastY = 0
+let fpsYaw = 0, fpsPitch = 0
+let fpsHeightBase = 1.6
+const fpsHeight = ref(1.6)
+const fpsHeightMin = ref(-2)
+const fpsHeightMax = ref(10)
+
+function onFpsKeyDown(e: KeyboardEvent) { fpsKeys.add(e.code) }
+function onFpsKeyUp(e: KeyboardEvent) { fpsKeys.delete(e.code) }
+function onFpsPointerDown(e: PointerEvent) {
+  fpsDragging = true; fpsLastX = e.clientX; fpsLastY = e.clientY
+  ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
+}
+function onFpsPointerMove(e: PointerEvent) {
+  if (!fpsDragging) return
+  fpsYaw -= (e.clientX - fpsLastX) * 0.003
+  fpsPitch = Math.max(-1.4, Math.min(1.4, fpsPitch - (e.clientY - fpsLastY) * 0.003))
+  fpsLastX = e.clientX; fpsLastY = e.clientY
+  cameraRef?.setLocalEulerAngles(fpsPitch * 180 / Math.PI, fpsYaw * 180 / Math.PI, 0)
+}
+function onFpsPointerUp() { fpsDragging = false }
+function onFpsUpdate(dt: number) {
+  if (!cameraRef || cameraMode.value !== 'fps') return
+  const speed = 4 * dt
+  let dx = 0, dz = 0
+  if (fpsKeys.has('KeyW') || fpsKeys.has('ArrowUp'))    { dx -= Math.sin(fpsYaw); dz -= Math.cos(fpsYaw) }
+  if (fpsKeys.has('KeyS') || fpsKeys.has('ArrowDown'))  { dx += Math.sin(fpsYaw); dz += Math.cos(fpsYaw) }
+  if (fpsKeys.has('KeyA') || fpsKeys.has('ArrowLeft'))  { dx -= Math.cos(fpsYaw); dz += Math.sin(fpsYaw) }
+  if (fpsKeys.has('KeyD') || fpsKeys.has('ArrowRight')) { dx += Math.cos(fpsYaw); dz -= Math.sin(fpsYaw) }
+  const pos = cameraRef.getPosition()
+  const h = fpsHeight.value
+  if (dx !== 0 || dz !== 0) {
+    cameraRef.setPosition(pos.x + dx * speed, h, pos.z + dz * speed)
+  } else if (Math.abs(pos.y - h) > 0.001) {
+    cameraRef.setPosition(pos.x, h, pos.z)
+  }
+}
+
+let topDragging = false, topLastX = 0, topLastY = 0
+let topHeight = 10, topPanX = 0, topPanZ = 0
+function onTopPointerDown(e: PointerEvent) {
+  topDragging = true; topLastX = e.clientX; topLastY = e.clientY
+  ;(e.target as HTMLElement).setPointerCapture(e.pointerId)
+}
+function onTopPointerMove(e: PointerEvent) {
+  if (!topDragging || !cameraRef) return
+  const scale = topHeight * 0.0015
+  topPanX -= (e.clientX - topLastX) * scale
+  topPanZ -= (e.clientY - topLastY) * scale
+  topLastX = e.clientX; topLastY = e.clientY
+  cameraRef.setPosition(topPanX, topHeight, topPanZ)
+}
+function onTopPointerUp() { topDragging = false }
+function onTopWheel(e: WheelEvent) {
+  e.preventDefault()
+  topHeight = Math.max(0.5, topHeight * (1 + e.deltaY * 0.001))
+  cameraRef?.setPosition(topPanX, topHeight, topPanZ)
+}
+
+function leaveCameraMode(canvas: HTMLCanvasElement) {
+  if (cameraMode.value === 'fps') {
+    appRef?.off('update', onFpsUpdate)
+    canvas.removeEventListener('pointerdown', onFpsPointerDown)
+    canvas.removeEventListener('pointermove', onFpsPointerMove)
+    canvas.removeEventListener('pointerup', onFpsPointerUp)
+    window.removeEventListener('keydown', onFpsKeyDown)
+    window.removeEventListener('keyup', onFpsKeyUp)
+    fpsKeys.clear()
+  } else if (cameraMode.value === 'tps') {
+    appRef?.off('update', onTpsUpdate)
+    canvas.removeEventListener('pointerdown', onTpsPointerDown)
+    canvas.removeEventListener('pointermove', onTpsPointerMove)
+    canvas.removeEventListener('pointerup', onTpsPointerUp)
+    window.removeEventListener('keydown', onTpsKeyDown)
+    window.removeEventListener('keyup', onTpsKeyUp)
+    tpsKeys.clear()
+    canvas.removeEventListener('wheel', onTpsWheel)
+    destroyTpsChar()
+  } else if (cameraMode.value === 'top') {
+    canvas.removeEventListener('pointerdown', onTopPointerDown)
+    canvas.removeEventListener('pointermove', onTopPointerMove)
+    canvas.removeEventListener('pointerup', onTopPointerUp)
+    canvas.removeEventListener('wheel', onTopWheel)
+  }
+}
+
+function switchCameraMode() {
+  const modes = ['orbit', 'fps', 'tps', 'top'] as const
+  const next = modes[(modes.indexOf(cameraMode.value) + 1) % 4]
+  const canvas = sharedCanvas
+  if (!canvas || !cameraRef) return
+
+  leaveCameraMode(canvas)
+
+  if (next === 'orbit') {
+    cameraRef.script.cameraControls.enabled = true
+  } else if (next === 'fps') {
+    cameraRef.script.cameraControls.enabled = false
+    const e = cameraRef.getLocalEulerAngles()
+    fpsYaw = e.y * Math.PI / 180
+    fpsPitch = e.x * Math.PI / 180
+    appRef?.on('update', onFpsUpdate)
+    canvas.addEventListener('pointerdown', onFpsPointerDown)
+    canvas.addEventListener('pointermove', onFpsPointerMove)
+    canvas.addEventListener('pointerup', onFpsPointerUp)
+    window.addEventListener('keydown', onFpsKeyDown)
+    window.addEventListener('keyup', onFpsKeyUp)
+  } else if (next === 'tps') {
+    cameraRef.script.cameraControls.enabled = false
+    TPS_DIST = 2.8
+    appRef?.on('update', onTpsUpdate)
+    canvas.addEventListener('pointerdown', onTpsPointerDown)
+    canvas.addEventListener('pointermove', onTpsPointerMove)
+    canvas.addEventListener('pointerup', onTpsPointerUp)
+    canvas.addEventListener('wheel', onTpsWheel, { passive: false })
+    window.addEventListener('keydown', onTpsKeyDown)
+    window.addEventListener('keyup', onTpsKeyUp)
+  } else {
+    cameraRef.script.cameraControls.enabled = false
+    const pos = cameraRef.getPosition()
+    topPanX = pos.x; topPanZ = pos.z
+    topHeight = Math.max(5, pos.y + 4)
+    cameraRef.setPosition(topPanX, topHeight, topPanZ)
+    cameraRef.setLocalEulerAngles(-90, 0, 0)
+    canvas.addEventListener('pointerdown', onTopPointerDown)
+    canvas.addEventListener('pointermove', onTopPointerMove)
+    canvas.addEventListener('pointerup', onTopPointerUp)
+    canvas.addEventListener('wheel', onTopWheel, { passive: false })
+  }
+  cameraMode.value = next
+  emit('camera-mode', next)
+}
 
 defineExpose({
   addModel(url: string, id: string, dataRotation?: Vec3): Promise<'added' | 'already-present' | 'not-ready'> {
@@ -507,6 +780,150 @@ defineExpose({
       app.assets.load(asset)
     })
   },
+  getInstanceAabbCenter(id: string): [number, number, number] | null {
+    if (!isActive || !pcRef) return null
+    const entry = entitiesById.get(id)
+    if (!entry) return null
+    const aabb = getWorldAabb(pcRef, entry.splat, entry.kind)
+    if (aabb) return [aabb.center.x, aabb.center.y, aabb.center.z]
+    const pos = entry.root.getPosition()
+    return [pos.x, pos.y, pos.z]
+  },
+  showDebugGroundPlane(y: number) {
+    if (debugGroundPlaneEntity) {
+      session.entities.delete(debugGroundPlaneEntity)
+      debugGroundPlaneEntity.destroy()
+      debugGroundPlaneEntity = null
+    }
+    if (!pcRef || !appRef) return
+    const pc = pcRef
+    const app = appRef
+    const half = 15
+    const positions = [-half, y, -half, half, y, -half, -half, y, half, half, y, half]
+    const indices = [0, 2, 1, 1, 2, 3]
+    const mesh = new pc.Mesh(app.graphicsDevice)
+    mesh.setPositions(positions)
+    mesh.setIndices(indices)
+    mesh.update()
+    const mat = new pc.StandardMaterial()
+    mat.emissive = new pc.Color(0.35, 0.75, 1.0)
+    mat.emissiveIntensity = 1
+    mat.cull = pc.CULLFACE_NONE
+    mat.update()
+    const entity = new pc.Entity('debug-ground-plane')
+    app.root.addChild(entity)
+    entity.addComponent('render')
+    const mi = new pc.MeshInstance(mesh, mat, entity)
+    mi.cull = false
+    entity.render.meshInstances = [mi]
+    session.entities.add(entity)
+    debugGroundPlaneEntity = entity
+  },
+  hideDebugGroundPlane() {
+    if (!debugGroundPlaneEntity) return
+    session.entities.delete(debugGroundPlaneEntity)
+    debugGroundPlaneEntity.destroy()
+    debugGroundPlaneEntity = null
+  },
+  loadTpsCharacter(url: string, floorY: number) {
+    if (!pcRef || !appRef) return
+    destroyTpsChar()
+    const pc = pcRef
+    const app = appRef
+    const kind = kindForUrl(url)
+    const rotation = kind === 'mesh' ? [0, 0, 0] : [180, 0, 0]
+    const asset = new pc.Asset('tps-char', kind === 'mesh' ? 'container' : 'gsplat', { url })
+    app.assets.add(asset)
+    asset.once('load', () => {
+      if (!isActive) return
+      const root = new pc.Entity('TpsChar')
+      app.root.addChild(root)
+      const splat = new pc.Entity('TpsChar-inner')
+      splat.setLocalEulerAngles(rotation[0], rotation[1], rotation[2])
+      if (kind === 'mesh') {
+        splat.addChild(asset.resource.instantiateRenderEntity())
+      } else {
+        splat.addComponent('gsplat', { asset })
+      }
+      root.addChild(splat)
+      session.entities.add(root)
+      tpsCharEntity = root
+      tpsCharSplat = splat
+      tpsCharKind = kind
+      hasTpsChar.value = true
+
+      const tryAlign = (attempts = 0) => {
+        const aabb = getWorldAabb(pc, splat, kind)
+        if (!aabb && attempts < 10) { setTimeout(() => tryAlign(attempts + 1), 100); return }
+        if (!aabb) return
+        tpsCharHalfH = (aabb.max.y - aabb.min.y) / 2
+        const bottomOffset = root.getPosition().y - aabb.min.y
+        root.setPosition(0, floorY + bottomOffset, 0)
+      }
+      tryAlign()
+    })
+    app.assets.load(asset)
+  },
+  attachRiskMarkerGizmo(bbox: { bboxMin: Vec3; bboxMax: Vec3 }, onUpdate: (b: { bboxMin: Vec3; bboxMax: Vec3 }) => void) {
+    if (!pcRef || !appRef) return
+    detachRiskGizmoInternal()
+    const pc = pcRef
+    const app = appRef
+    const cx = (bbox.bboxMin[0] + bbox.bboxMax[0]) / 2
+    const cy = (bbox.bboxMin[1] + bbox.bboxMax[1]) / 2
+    const cz = (bbox.bboxMin[2] + bbox.bboxMax[2]) / 2
+    const sx = Math.max(Math.abs(bbox.bboxMax[0] - bbox.bboxMin[0]), 0.01)
+    const sy = Math.max(Math.abs(bbox.bboxMax[1] - bbox.bboxMin[1]), 0.01)
+    const sz = Math.max(Math.abs(bbox.bboxMax[2] - bbox.bboxMin[2]), 0.01)
+    const entity = new pc.Entity('risk-gizmo-target')
+    app.root.addChild(entity)
+    entity.setPosition(cx, cy, cz)
+    entity.setLocalScale(sx, sy, sz)
+    session.entities.add(entity)
+    riskGizmoEntity = entity
+    riskGizmoOnUpdate = onUpdate
+    applyGizmoState()
+  },
+  detachRiskMarkerGizmo() {
+    detachRiskGizmoInternal()
+    applyGizmoState()
+  },
+  pickWorldAtY(clientX: number, clientY: number, planeY: number): [number, number, number] | null {
+    if (!pcRef || !cameraRef || !sharedCanvas) return null
+    const pc = pcRef
+    const camera = cameraRef
+    const rect = sharedCanvas.getBoundingClientRect()
+    const x = clientX - rect.left
+    const y = clientY - rect.top
+    const near = camera.camera.screenToWorld(x, y, camera.camera.nearClip)
+    const far = camera.camera.screenToWorld(x, y, camera.camera.farClip)
+    const dir = far.clone().sub(near).normalize()
+    if (Math.abs(dir.y) < 0.001) return null
+    const t = (planeY - near.y) / dir.y
+    if (t < 0) return null
+    return [near.x + dir.x * t, planeY, near.z + dir.z * t]
+  },
+  getInstanceAabbSize(id: string): [number, number, number] | null {
+    if (!isActive || !pcRef) return null
+    const entry = entitiesById.get(id)
+    if (!entry) return null
+    const aabb = getWorldAabb(pcRef, entry.splat, entry.kind)
+    if (!aabb) return null
+    return [aabb.halfExtents.x * 2, aabb.halfExtents.y * 2, aabb.halfExtents.z * 2]
+  },
+  getSceneAabbSize(): [number, number, number] | null {
+    if (!isActive || !pcRef) return null
+    const pc = pcRef
+    let combined: any = null
+    for (const { splat, kind } of allLoadedEntities) {
+      const aabb = getWorldAabb(pc, splat, kind)
+      if (!aabb) continue
+      if (!combined) combined = aabb
+      else combined.add(aabb)
+    }
+    if (!combined) return null
+    return [combined.halfExtents.x * 2, combined.halfExtents.y * 2, combined.halfExtents.z * 2]
+  },
   removeModel(id: string) {
     const entry = entitiesById.get(id)
     if (!entry) return
@@ -520,10 +937,194 @@ defineExpose({
     session.entities.delete(entry.root)
     entry.root.destroy()
   },
+  showFloor(floor: { y: number; cellSize: number; cells: [number, number][] } | null) {
+    if (floorEntityRef) {
+      session.entities.delete(floorEntityRef)
+      floorEntityRef.destroy()
+      floorEntityRef = null
+    }
+    if (!floor || !floor.cells.length || !isActive || !pcRef || !appRef) return
+    const pc = pcRef
+    const app = appRef
+    const { y, cellSize, cells } = floor
+    const positions: number[] = []
+    const indices: number[] = []
+    for (const [cx, cz] of cells) {
+      const x0 = cx * cellSize, x1 = (cx + 1) * cellSize
+      const z0 = cz * cellSize, z1 = (cz + 1) * cellSize
+      const base = positions.length / 3
+      positions.push(x0, y, z0, x1, y, z0, x0, y, z1, x1, y, z1)
+      indices.push(base, base + 2, base + 1, base + 1, base + 2, base + 3)
+    }
+    const mesh = new pc.Mesh(app.graphicsDevice)
+    mesh.setPositions(positions)
+    mesh.setIndices(indices)
+    mesh.update()
+    const mat = new pc.StandardMaterial()
+    mat.diffuse = new pc.Color(0.25, 0.65, 1.0)
+    mat.opacity = 0.28
+    mat.blendType = pc.BLEND_NORMAL
+    mat.depthWrite = false
+    mat.cull = pc.CULLFACE_NONE
+    mat.update()
+    const entity = new pc.Entity('floor-plane')
+    app.root.addChild(entity)
+    entity.addComponent('render')
+    const floorMi = new pc.MeshInstance(mesh, mat, entity)
+    floorMi.cull = false
+    entity.render.meshInstances = [floorMi]
+    session.entities.add(entity)
+    floorEntityRef = entity
+  },
+  showRoute(route: { floorY: number; cellSize: number; freeCells: [number, number][]; narrowCells: [number, number][] } | null) {
+    for (const ref of [routeFreeEntityRef, routeNarrowEntityRef]) {
+      if (ref) { session.entities.delete(ref); ref.destroy() }
+    }
+    routeFreeEntityRef = null
+    routeNarrowEntityRef = null
+    if (!route || !isActive || !pcRef || !appRef) return
+    const pc = pcRef
+    const app = appRef
+    const { floorY, cellSize, freeCells, narrowCells } = route
+
+    function buildMesh(cells: [number, number][], y: number): any {
+      const positions: number[] = []
+      const indices: number[] = []
+      for (const [cx, cz] of cells) {
+        const x0 = cx * cellSize, x1 = (cx + 1) * cellSize
+        const z0 = cz * cellSize, z1 = (cz + 1) * cellSize
+        const base = positions.length / 3
+        positions.push(x0, y, z0, x1, y, z0, x0, y, z1, x1, y, z1)
+        indices.push(base, base + 2, base + 1, base + 1, base + 2, base + 3)
+      }
+      const mesh = new pc.Mesh(app.graphicsDevice)
+      mesh.setPositions(positions)
+      mesh.setIndices(indices)
+      mesh.update()
+      return mesh
+    }
+
+    function createEntity(cells: [number, number][], y: number, r: number, g: number, b: number, name: string): any {
+      if (!cells.length) return null
+      const mat = new pc.StandardMaterial()
+      mat.diffuse = new pc.Color(r, g, b)
+      mat.opacity = 0.38
+      mat.blendType = pc.BLEND_NORMAL
+      mat.depthWrite = false
+      mat.cull = pc.CULLFACE_NONE
+      mat.update()
+      const entity = new pc.Entity(name)
+      app.root.addChild(entity)
+      entity.addComponent('render')
+      const mi = new pc.MeshInstance(buildMesh(cells, y), mat, entity)
+      mi.cull = false
+      entity.render.meshInstances = [mi]
+      session.entities.add(entity)
+      return entity
+    }
+
+    const routeY = floorY + 0.02
+    const narrowSet = new Set(narrowCells.map(([cx, cz]) => `${cx},${cz}`))
+    const pureFree = freeCells.filter(([cx, cz]) => !narrowSet.has(`${cx},${cz}`))
+
+    routeFreeEntityRef = createEntity(pureFree, routeY, 0.18, 0.82, 0.32, 'route-free')
+    routeNarrowEntityRef = createEntity(narrowCells, routeY, 1.0, 0.58, 0.1, 'route-narrow')
+  },
+  showRiskMarkers(markers: { bboxMin: Vec3; bboxMax: Vec3 }[], selectedIndices?: number[] | null) {
+    riskMarkersForPick = markers
+    if (!pcRef || !riskMarkerLinesRef.length) return
+    const pc = pcRef
+    const defaultColor = new pc.Color(0.9, 0.25, 0.15)
+    const selectedColor = new pc.Color(1.0, 0.82, 0.0)
+    const shown = markers.slice(0, MAX_RISK_MARKERS)
+    shown.forEach((marker, markerIndex) => {
+      const color = selectedIndices?.includes(markerIndex) ? selectedColor : defaultColor
+      const [minX, minY, minZ] = marker.bboxMin
+      const [maxX, maxY, maxZ] = marker.bboxMax
+      const pick = (t: [number, number, number]) =>
+        new pc.Vec3(t[0] ? maxX : minX, t[1] ? maxY : minY, t[2] ? maxZ : minZ)
+      BOX_EDGES.forEach(([a, b], edgeIndex) => {
+        const line = riskMarkerLinesRef[markerIndex * 12 + edgeIndex]
+        line.entity.enabled = true
+        line.thickness = RISK_MARKER_LINE_THICKNESS
+        line.draw(pick(a), pick(b), 1, color)
+      })
+    })
+    for (let i = shown.length * 12; i < riskMarkerLinesRef.length; i++) {
+      riskMarkerLinesRef[i].entity.enabled = false
+    }
+  },
+  showPathArrows(waypoints: { position: [number, number, number]; length: number; width: number; rotationY: number }[]) {
+    for (const e of pathArrowEntities) { session.entities.delete(e); e.destroy() }
+    pathArrowEntities = []
+    if (!isActive || !pcRef || !appRef || !waypoints.length) return
+    const pc = pcRef
+    const app = appRef
+
+    const positions: number[] = []
+    const indices: number[] = []
+    let base = 0
+
+    for (const { position: [ox, oy, oz], length: len, width: W, rotationY } of waypoints) {
+      const rad = (rotationY * Math.PI) / 180
+      const fx = Math.sin(rad), fz = Math.cos(rad)
+      const rx = -fz, rz = fx
+      const hw = W / 2
+      const H = Math.max(hw * 0.5, 0.04)
+
+      const corners = (fw: number, fh: number, fl: number): [number, number, number] => [
+        ox + rx * fw + fx * fl,
+        oy + fh,
+        oz + rz * fw + fz * fl,
+      ]
+      const v = [
+        corners(-hw, -H, 0),
+        corners( hw, -H, 0),
+        corners(-hw,  H, 0),
+        corners( hw,  H, 0),
+        corners(-hw, -H, len),
+        corners( hw, -H, len),
+        corners(-hw,  H, len),
+        corners( hw,  H, len),
+      ]
+      for (const [vx, vy, vz] of v) positions.push(vx, vy, vz)
+      const b = base
+      indices.push(
+        b+2,b+3,b+6, b+3,b+7,b+6,
+        b+0,b+4,b+1, b+1,b+4,b+5,
+        b+0,b+1,b+2, b+1,b+3,b+2,
+        b+4,b+6,b+5, b+5,b+6,b+7,
+        b+0,b+2,b+4, b+2,b+6,b+4,
+        b+1,b+5,b+3, b+3,b+5,b+7,
+      )
+      base += 8
+    }
+
+    const mesh = new pc.Mesh(app.graphicsDevice)
+    mesh.setPositions(positions)
+    mesh.setIndices(indices)
+    mesh.update()
+
+    const mat = new pc.StandardMaterial()
+    mat.emissive = new pc.Color(0.2, 0.5, 1.0)
+    mat.emissiveIntensity = 1.0
+    mat.diffuse = new pc.Color(0, 0, 0)
+    mat.cull = pc.CULLFACE_NONE
+    mat.update()
+
+    const entity = new pc.Entity('path-arrows')
+    app.root.addChild(entity)
+    entity.addComponent('render')
+    const mi = new pc.MeshInstance(mesh, mat, entity)
+    mi.cull = false
+    entity.render.meshInstances = [mi]
+    session.entities.add(entity)
+    pathArrowEntities.push(entity)
+  },
   async captureThumbnail(): Promise<Blob | null> {
     if (!isActive || !session.active || !pcRef || !cameraRef || !sharedCanvas) return null
     const lodDeadline = Date.now() + 60000
-    while (lodCurrentPending.value > 0 && Date.now() < lodDeadline && isActive && session.active) {
+    while (loadStage.value !== 'done' && Date.now() < lodDeadline && isActive && session.active) {
       await new Promise<void>((resolve) => requestAnimationFrame(() => resolve()))
     }
     if (!isActive || !session.active) return null
@@ -574,7 +1175,7 @@ defineExpose({
       sharedCanvas!.toBlob((blob) => resolve(blob), 'image/jpeg', 0.85)
     })
   },
-  getVisibleInstanceScreenPositions(): { id: string; x: number; y: number; distance: number }[] {
+  getVisibleInstanceScreenPositions(): { id: string; x: number; y: number; distance: number; worldPos: [number, number, number] | null }[] {
     if (!isActive || !pcRef || !cameraRef || !appRef) return []
     const pc = pcRef
     const camera = cameraRef
@@ -583,18 +1184,18 @@ defineExpose({
     const cameraPos = camera.getPosition()
     const cameraForward = camera.forward
     const screenPos = new pc.Vec3()
-    const out: { id: string; x: number; y: number; distance: number }[] = []
+    const out: { id: string; x: number; y: number; distance: number; worldPos: [number, number, number] | null }[] = []
     for (const [id, { root, splat, kind }] of entitiesById) {
       if (!root.enabled) continue
       const worldAabb = getWorldAabb(pc, splat, kind)
       const worldPos = worldAabb ? worldAabb.center : root.getPosition()
       const toObject = worldPos.clone().sub(cameraPos)
-      if (toObject.dot(cameraForward) <= 0) continue // 在相機後面,不可能在畫面上看得到
+      if (toObject.dot(cameraForward) <= 0) continue
       camera.camera.worldToScreen(worldPos, screenPos)
       const x = (screenPos.x / width) * 1000
       const y = (screenPos.y / height) * 1000
-      if (x < 0 || x > 1000 || y < 0 || y > 1000) continue 
-      out.push({ id, x, y, distance: toObject.length() })
+      if (x < 0 || x > 1000 || y < 0 || y > 1000) continue
+      out.push({ id, x, y, distance: toObject.length(), worldPos: [worldPos.x, worldPos.y, worldPos.z] })
     }
     return out
   },
@@ -603,6 +1204,15 @@ defineExpose({
     const camera = cameraRef
     const toArray = (v: any): Vec3 => [v.x, v.y, v.z]
     return { right: toArray(camera.right), up: toArray(camera.up), forward: toArray(camera.forward) }
+  },
+  getCameraState(): { position: Vec3; forward: Vec3 } | null {
+    if (!isActive || !cameraRef) return null
+    const pos = cameraRef.getPosition()
+    const fwd = cameraRef.forward
+    return {
+      position: [pos.x, pos.y, pos.z],
+      forward: [fwd.x, fwd.y, fwd.z],
+    }
   },
   updateInstanceTransform(id: string, transform: { position: Vec3; rotation: Vec3; scale: Vec3 }) {
     const entry = entitiesById.get(id)
@@ -656,17 +1266,30 @@ onBeforeUnmount(() => {
   isActive = false
   resizeObserver?.disconnect()
   resizeObserver = null
+  if (resizeTimer) { clearTimeout(resizeTimer); resizeTimer = null }
   sharedCanvas?.removeEventListener('pointerdown', onCanvasPointerDown)
   sharedCanvas?.removeEventListener('pointerup', onCanvasPointerUp)
   appRef?.off('update', onAppUpdate)
+  appRef?.off('update', onFpsUpdate)
   appRef?.systems.gsplat.off('frame:ready', onGsplatFrameReady)
+  window.removeEventListener('keydown', onFpsKeyDown)
+  window.removeEventListener('keyup', onFpsKeyUp)
   if (gizmosRef) {
     for (const gizmo of Object.values(gizmosRef) as any[]) gizmo.off('pointer:up', persistSelectedTransform)
   }
   highlightedEntity = null
+  floorEntityRef = null
+  routeFreeEntityRef = null
+  routeNarrowEntityRef = null
   for (const line of highlightLinesRef) line.entity.enabled = false
+  for (const line of riskMarkerLinesRef) line.entity.enabled = false
+  riskMarkersForPick = []
+  detachRiskGizmoInternal()
+  if (debugGroundPlaneEntity) { session.entities.delete(debugGroundPlaneEntity); debugGroundPlaneEntity.destroy(); debugGroundPlaneEntity = null }
   // 把畫布交還給底下(如果有的話)還在畫面上的上一個 GSplatViewer,銷毀自己建立的 entity——
   // 不是無條件把畫布從畫面上移除,不然編輯頁面的主畫面被疊在上面的預覽彈窗關掉後會整個變黑
+  if (sharedCanvas) leaveCameraMode(sharedCanvas)
+  destroyTpsChar()
   if (sharedCanvas) releaseCanvas(sharedCanvas, session, gizmosRef)
   sharedCanvas = null
 })
@@ -676,6 +1299,64 @@ onBeforeUnmount(() => {
   <div ref="wrapperRef" class="gsplat-viewer">
     <div v-if="loading" class="gsplat-viewer__loading">{{ loadPercent }}%</div>
     <div v-else-if="loadStage !== 'done'" class="gsplat-viewer__refining">{{ loadPercent }}%</div>
+    <div v-if="loadStage === 'done' && cameraMode === 'fps'" class="gsplat-viewer__height-ctrl">
+      <input
+        type="range"
+        class="gsplat-viewer__height-slider"
+        v-model.number="fpsHeight"
+        :min="fpsHeightMin"
+        :max="fpsHeightMax"
+        step="0.1"
+        orient="vertical"
+      />
+    </div>
+    <div v-if="cameraMode === 'tps' && !hasTpsChar" class="gsplat-viewer__tps-hint">
+      點擊右上角按鈕選擇操控模型
+    </div>
+    <div v-if="loadStage === 'done'" class="gsplat-viewer__cam-stack">
+      <button
+        type="button"
+        class="gsplat-viewer__cam-btn"
+        :title="cameraMode === 'orbit' ? '切換第一人稱' : cameraMode === 'fps' ? '切換第三人稱' : cameraMode === 'tps' ? '切換頂視圖' : '切換預設視角'"
+        @click="switchCameraMode"
+      >
+        <!-- orbit -->
+        <svg v-if="cameraMode === 'orbit'" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M3 12a9 9 0 1 0 18 0 9 9 0 0 0-18 0"/>
+          <path d="M3.6 9h16.8"/><path d="M3.6 15h16.8"/>
+          <path d="M11.5 3a17 17 0 0 0 0 18"/><path d="M12.5 3a17 17 0 0 1 0 18"/>
+        </svg>
+        <!-- fps -->
+        <svg v-else-if="cameraMode === 'fps'" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="12" cy="5" r="2"/><path d="M12 7v6"/>
+          <path d="M9 17l3-4 3 4"/><path d="M7 21l2-4"/><path d="M17 21l-2-4"/>
+        </svg>
+        <!-- tps: 人跟攝影機 -->
+        <svg v-else-if="cameraMode === 'tps'" width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <circle cx="8" cy="5" r="2"/><path d="M8 7v5"/><path d="M5 18l3-6 3 6"/>
+          <rect x="15" y="9" width="6" height="5" rx="1"/>
+          <path d="M15 11.5l-3 0"/><circle cx="12" cy="11.5" r="0.5" fill="currentColor"/>
+        </svg>
+        <!-- top -->
+        <svg v-else width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <rect x="3" y="3" width="8" height="8" rx="1"/><rect x="13" y="3" width="8" height="8" rx="1"/>
+          <rect x="3" y="13" width="8" height="8" rx="1"/><rect x="13" y="13" width="8" height="8" rx="1"/>
+        </svg>
+      </button>
+      <button
+        v-if="cameraMode === 'tps'"
+        type="button"
+        class="gsplat-viewer__cam-btn"
+        title="選擇操控模型"
+        @click="emit('request-tps-char')"
+      >
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M20 7H4a2 2 0 0 0-2 2v6a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2z"/>
+          <circle cx="12" cy="12" r="2"/>
+          <path d="M6 12h.01M18 12h.01"/>
+        </svg>
+      </button>
+    </div>
   </div>
 </template>
 
@@ -714,5 +1395,70 @@ onBeforeUnmount(() => {
   color: #fff;
   font-size: 0.75rem;
   pointer-events: none;
+}
+
+.gsplat-viewer__tps-hint {
+  position: absolute;
+  bottom: 2rem;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 0.85rem;
+  padding: 0.5rem 1rem;
+  border-radius: 0.5rem;
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.gsplat-viewer__cam-stack {
+  position: absolute;
+  top: 0.75rem;
+  right: 0.75rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  z-index: 10;
+}
+
+.gsplat-viewer__cam-btn {
+  width: 2.25rem;
+  height: 2.25rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: 0.5rem;
+  background: rgba(0, 0, 0, 0.5);
+  color: #fff;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s;
+}
+
+.gsplat-viewer__cam-btn:hover {
+  background: var(--color-clay, #c0855a);
+  color: #fff;
+}
+
+.gsplat-viewer__height-ctrl {
+  position: absolute;
+  top: calc(0.75rem + 2.25rem + 0.5rem);
+  right: 0.75rem;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 0, 0, 0.5);
+  border-radius: 0.5rem;
+  padding: 0.5rem 0.4rem;
+}
+
+.gsplat-viewer__height-slider {
+  writing-mode: vertical-lr;
+  direction: rtl;
+  width: 1.375rem;
+  height: 7rem;
+  cursor: pointer;
+  accent-color: #fff;
+  background: transparent;
 }
 </style>

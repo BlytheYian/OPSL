@@ -20,12 +20,21 @@ const zoom = ref(1)
 const viewerError = ref<string | null>(null)
 const viewerRef = ref<InstanceType<typeof GSplatViewer> | null>(null)
 
-async function maybeCaptureThumbnail() {
+const previewSize = ref<[number, number, number] | null>(null)
+
+async function onViewerLoaded() {
+  const size = viewerRef.value?.getSceneAabbSize() ?? null
+  previewSize.value = size
+  if (size && props.kind === 'object') library.objectSizes[props.item.id] = size
   if (props.item.thumbnail !== PLACEHOLDER_THUMBNAIL) return
-  await new Promise((resolve) => setTimeout(resolve, 300))
-  const blob = await viewerRef.value?.captureCurrentView().catch(() => null)
+  await new Promise((resolve) => setTimeout(resolve, 1000))
+  const blob = await viewerRef.value?.captureThumbnail().catch(() => null)
   if (!blob) return
   await library.saveThumbnail(props.kind, props.item.id, blob).catch(() => {})
+}
+
+function fmtSize(s: [number, number, number]) {
+  return `${s[0].toFixed(2)}m × ${s[1].toFixed(2)}m × ${s[2].toFixed(2)}m`
 }
 
 const renaming = ref(false)
@@ -145,7 +154,7 @@ async function closeModal(which: 'close' | 'add') {
               :colors="viewerColors"
               @error="(msg) => (viewerError = msg)"
               @progress="(p) => (enteringPercent = p)"
-              @loaded="maybeCaptureThumbnail"
+              @loaded="onViewerLoaded"
             />
             <p v-if="viewerError" class="preview-modal__viewer-error">3D 檢視器載入失敗:{{ viewerError }}</p>
           </template>
@@ -177,6 +186,7 @@ async function closeModal(which: 'close' | 'add') {
             <span class="preview-modal__rename-hint">✎</span>
           </h2>
           <h2 v-else>{{ item.name }}</h2>
+          <p v-if="previewSize" class="preview-modal__size">{{ fmtSize(previewSize) }}</p>
 
           <div v-if="kind === 'scene' && versions.length" class="preview-modal__timeline">
             <div class="preview-modal__timeline-track" />
@@ -385,6 +395,13 @@ async function closeModal(which: 'close' | 'add') {
   color: var(--color-ink-soft);
   font-size: 0.95rem;
   line-height: 1.7;
+}
+
+.preview-modal__size {
+  font-size: 0.85rem;
+  color: var(--color-ink-soft);
+  font-variant-numeric: tabular-nums;
+  margin-top: -0.25rem;
 }
 
 .preview-modal__timeline {
