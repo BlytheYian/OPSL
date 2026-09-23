@@ -44,6 +44,11 @@ const SCENES: SceneSeed[] = [
     description:
       "InteriorGS 資料集場景 0001_839920(非商業研究/教育用途,不可重新散布,見 InteriorGS License)。927,067 顆高斯,SuperSplat 壓縮格式,物件用官方 ground-truth 3D 包圍盒直接裁切,不經過分類器推論。",
   },
+  {
+    id: "dev-australia",
+    name: "澳洲",
+    description: "australia point_cloud.ply 開發用場景。",
+  },
 ];
 
 function fmt(n: number): string {
@@ -81,7 +86,14 @@ function makeInstanceId() {
 }
 
 async function main() {
-  const objects = interiorgsObjects();
+  const devAustraliaBg: ObjectSeed = {
+    id: "dev-australia-bg",
+    name: "背景",
+    description: "australia point_cloud.ply",
+    modelUrl: `${BACKEND_ORIGIN}/storage/models/dev/point_cloud.ply`,
+    originSceneId: "dev-australia",
+  };
+  const objects = [...interiorgsObjects(), devAustraliaBg];
   const demoUserId = await ensureDemoUser();
 
   await pool.query("BEGIN");

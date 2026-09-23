@@ -176,6 +176,8 @@ let riskMarkerLinesRef: any[] = []
 let riskMarkersForPick: { bboxMin: Vec3; bboxMax: Vec3 }[] = []
 let riskGizmoEntity: any = null
 let riskGizmoOnUpdate: ((bbox: { bboxMin: Vec3; bboxMax: Vec3 }) => void) | null = null
+let pathGizmoEntity: any = null
+let pathGizmoOnUpdate: ((pos: [number, number, number]) => void) | null = null
 let debugGroundPlaneEntity: any = null
 let entitiesById = new Map<string, { root: any; splat: any; kind: 'gsplat' | 'mesh' }>()
 let allLoadedEntities: { root: any; splat: any; kind: 'gsplat' | 'mesh' }[] = []
@@ -333,8 +335,19 @@ function detachRiskGizmoInternal() {
   riskGizmoEntity = null
   riskGizmoOnUpdate = null
 }
+function detachPathGizmoInternal() {
+  if (!pathGizmoEntity) return
+  session.entities.delete(pathGizmoEntity)
+  pathGizmoEntity.destroy()
+  pathGizmoEntity = null
+  pathGizmoOnUpdate = null
+}
 
 function applyGizmoState() {
+  if (pathGizmoEntity) {
+    if (gizmosRef) setGizmoTarget(gizmosRef, 'translate', pathGizmoEntity)
+    return
+  }
   if (riskGizmoEntity) {
     if (gizmosRef) setGizmoTarget(gizmosRef, props.gizmoMode ?? null, riskGizmoEntity)
     return
@@ -356,6 +369,11 @@ function vec3Unchanged(a: Vec3, b: Vec3): boolean {
 }
 
 function persistSelectedTransform() {
+  if (pathGizmoEntity && pathGizmoOnUpdate) {
+    const pos = pathGizmoEntity.getPosition()
+    pathGizmoOnUpdate([pos.x, pos.y, pos.z])
+    return
+  }
   if (riskGizmoEntity && riskGizmoOnUpdate) {
     const pos = riskGizmoEntity.getPosition()
     const s = riskGizmoEntity.getLocalScale()
@@ -888,6 +906,22 @@ defineExpose({
     detachRiskGizmoInternal()
     applyGizmoState()
   },
+  attachPathWaypointGizmo(position: [number, number, number], onUpdate: (pos: [number, number, number]) => void) {
+    if (!pcRef || !appRef) return
+    detachRiskGizmoInternal()
+    detachPathGizmoInternal()
+    const entity = new pcRef.Entity('path-gizmo-target')
+    appRef.root.addChild(entity)
+    entity.setPosition(position[0], position[1], position[2])
+    session.entities.add(entity)
+    pathGizmoEntity = entity
+    pathGizmoOnUpdate = onUpdate
+    applyGizmoState()
+  },
+  detachPathWaypointGizmo() {
+    detachPathGizmoInternal()
+    applyGizmoState()
+  },
   pickWorldAtY(clientX: number, clientY: number, planeY: number): [number, number, number] | null {
     if (!pcRef || !cameraRef || !sharedCanvas) return null
     const pc = pcRef
@@ -1285,6 +1319,7 @@ onBeforeUnmount(() => {
   for (const line of riskMarkerLinesRef) line.entity.enabled = false
   riskMarkersForPick = []
   detachRiskGizmoInternal()
+  detachPathGizmoInternal()
   if (debugGroundPlaneEntity) { session.entities.delete(debugGroundPlaneEntity); debugGroundPlaneEntity.destroy(); debugGroundPlaneEntity = null }
   // 把畫布交還給底下(如果有的話)還在畫面上的上一個 GSplatViewer,銷毀自己建立的 entity——
   // 不是無條件把畫布從畫面上移除,不然編輯頁面的主畫面被疊在上面的預覽彈窗關掉後會整個變黑

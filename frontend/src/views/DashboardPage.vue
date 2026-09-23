@@ -1,15 +1,40 @@
 <script setup lang="ts">
-import { computed, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
-import { useLibraryStore, type LibraryItem } from '../stores/library'
+import { useLibraryStore, PLACEHOLDER_THUMBNAIL, type LibraryItem } from '../stores/library'
+import { useSceneObjectsStore } from '../stores/sceneObjects'
+import { API_ORIGIN } from '../lib/api'
 import ModelCard from '../components/ModelCard.vue'
 import PreviewModal from '../components/PreviewModal.vue'
 import UploadModal from '../components/UploadModal.vue'
+import { DEV_SCENE_ID, devSceneActive, deactivateDevScene } from '../components/DevSceneCard.vue'
 import iconGenerate from '../assets/icons/icon-generate.svg?raw'
 import iconLibrary from '../assets/icons/icon-library.svg?raw'
 
 const router = useRouter()
 const library = useLibraryStore()
+const sceneObjects = useSceneObjectsStore()
+
+watch(devSceneActive, (active) => {
+  if (!active) return
+  const BG_ID = 'dev-australia-bg'
+  const PLY_URL = `${API_ORIGIN}/storage/models/dev/point_cloud.ply`
+  if (!library.objects.find((o) => o.id === BG_ID)) {
+    library.objects.push({
+      id: BG_ID, name: '背景', thumbnail: PLACEHOLDER_THUMBNAIL,
+      createdAt: new Date(), status: 'ready',
+      description: 'australia point_cloud.ply', modelUrl: PLY_URL,
+    })
+  }
+  if (!sceneObjects.instances.find((i) => i.sceneId === DEV_SCENE_ID)) {
+    sceneObjects.instances.push({
+      id: 'dev-australia-bg-inst', sceneId: DEV_SCENE_ID, modelId: BG_ID,
+      label: '背景', hidden: false,
+      position: [0, 0, 0], rotation: [0, 0, 0], scale: [1, 1, 1], color: null,
+    })
+    sceneObjects.loadedSceneIds.add(DEV_SCENE_ID)
+  }
+}, { immediate: true })
 
 onMounted(() => {
   if (!library.scenesLoaded) library.fetchScenes()
@@ -23,8 +48,21 @@ watch(activeSection, (section) => {
 
 const activeTab = ref<'scenes' | 'objects'>('scenes')
 const effectiveTab = computed<'scenes' | 'objects'>(() => (activeSection.value === 'catalog' ? 'objects' : activeTab.value))
+const DEV_SCENE_ITEM: LibraryItem = {
+  id: DEV_SCENE_ID,
+  name: '澳洲',
+  thumbnail: '/dev-australia-thumb.png',
+  createdAt: new Date(),
+  status: 'ready',
+  description: 'australia point_cloud.ply 開發用場景。',
+}
 const rawItems = computed<LibraryItem[]>(() => {
-  if (activeSection.value === 'mine') return effectiveTab.value === 'scenes' ? library.scenes : library.objects
+  if (activeSection.value === 'mine') {
+    const base = effectiveTab.value === 'scenes' ? library.scenes : library.objects
+    const filtered = effectiveTab.value === 'scenes' ? base.filter((i) => i.id !== DEV_SCENE_ID) : base
+    if (devSceneActive.value && effectiveTab.value === 'scenes') return [DEV_SCENE_ITEM, ...filtered]
+    return filtered
+  }
   return library.catalogObjects
 })
 const searchQuery = ref('')
@@ -62,6 +100,7 @@ async function copyToMyLibrary() {
 }
 
 const uploadModalOpen = ref(false)
+onBeforeUnmount(deactivateDevScene)
 </script>
 
 <template>

@@ -244,6 +244,7 @@ const activeBboxGizmoIdx = ref<number | null>(null)
 const editingPath = ref<PathEntry | null>(null)
 const pathPlacingMode = ref(false)
 const pathPlacingY = ref(0.75)
+const selectedWaypointIdx = ref<number | null>(null)
 
 const _debugKeyBuf: string[] = []
 
@@ -315,8 +316,23 @@ function saveEditingPath() {
 }
 
 function deleteWaypoint(i: number) {
+  if (selectedWaypointIdx.value !== null) {
+    viewerRef.value?.detachPathWaypointGizmo()
+    selectedWaypointIdx.value = null
+  }
   editingPath.value?.waypoints.splice(i, 1)
   refreshPathArrows()
+}
+
+function selectWaypoint(i: number) {
+  if (!editingPath.value) return
+  selectedWaypointIdx.value = i
+  const wp = editingPath.value.waypoints[i]
+  viewerRef.value?.attachPathWaypointGizmo(wp.position, (pos) => {
+    if (!editingPath.value) return
+    editingPath.value.waypoints[i].position = pos
+    refreshPathArrows()
+  })
 }
 
 function updateWaypointLength(i: number, raw: string) {
@@ -768,20 +784,12 @@ const STATIC_IDEAS = [
     status: '建議中' as const,
   },
   {
-    title: '浴室入口鋪設防滑地墊',
-    risk: '浴室地板濕滑容易跌倒',
+    title: '鋪設防滑地墊',
+    risk: '容易跌倒',
     asset: '防滑地墊',
     assetId: 'opsl-ast-004',
     priority: '高' as const,
     status: '建議中' as const,
-  },
-  {
-    title: '安裝直式扶手輔助起身',
-    risk: '浴室缺乏扶持點，站立不穩',
-    asset: '直式扶手',
-    assetId: 'opsl-ast-001',
-    priority: '中' as const,
-    status: '評估中' as const,
   },
   {
     title: '玄關門檻加裝斜坡道',
@@ -801,7 +809,24 @@ const STATIC_IDEAS = [
   },
 ]
 
-const pathEditorActive = computed(() => riskDebugActive.value && rightTab.value === 'risk')
+const placedIdeaIndices = ref<number[]>([])
+async function placeIdeaModel(i: number) {
+  if (placedIdeaIndices.value.includes(i)) return
+  placedIdeaIndices.value = [...placedIdeaIndices.value, i]
+  const idea = STATIC_IDEAS[i]
+  const obj = library.objects.find((o) => o.id === idea.assetId)
+  if (!obj?.modelUrl || !scene.value) return
+  const instance = await sceneObjectsStore.addInstance(scene.value.id, obj.id, obj.name)
+  viewerRef.value?.addModel(obj.modelUrl, instance.id, upAxisFixFor(obj.id, obj.modelUrl))
+  const origin: Vec3 = [0, 0, 0]
+  viewerRef.value?.updateInstanceTransform(instance.id, { position: origin, rotation: origin, scale: [1, 1, 1] })
+  sceneObjectsStore.updateTransform(instance.id, { position: origin, rotation: origin, scale: [1, 1, 1] })
+  await nextTick()
+  gizmoMode.value = 'translate'
+  selectedObjectId.value = instance.id
+}
+
+const pathEditorActive = computed(() => rightTab.value === 'risk')
 
 watch(pathEditorActive, (active) => {
   if (active) {
@@ -812,6 +837,8 @@ watch(pathEditorActive, (active) => {
   } else {
     pathPlacingMode.value = false
     editingPath.value = null
+    selectedWaypointIdx.value = null
+    viewerRef.value?.detachPathWaypointGizmo()
     viewerRef.value?.showPathArrows([])
   }
 })
@@ -1675,7 +1702,7 @@ const historyIndex = computed(() => sceneObjectsStore.historyIndex)
                   <input v-model="editingPath.label" class="editor__risk-input" />
                 </label>
                 <div class="editor__risk-bboxes">
-                  <div v-for="(wp, i) in editingPath.waypoints" :key="i" class="editor__risk-bbox-block">
+                  <div v-for="(wp, i) in editingPath.waypoints" :key="i" class="editor__risk-bbox-block" :class="{ 'editor__risk-bbox-block--selected': selectedWaypointIdx === i }" @click="selectWaypoint(i)">
                     <div class="editor__risk-bbox-row">
                       <span class="editor__risk-bbox-label">P{{ i + 1 }}</span>
                       <span :style="{ fontSize: 'calc(0.68rem * var(--ts))', color: 'var(--color-ink-soft)', flex: '1' }">
@@ -1718,10 +1745,13 @@ const historyIndex = computed(() => sceneObjectsStore.historyIndex)
                 v-for="(idea, i) in STATIC_IDEAS"
                 :key="i"
                 class="editor__idea-item"
+                style="cursor:pointer"
+                @click="placeIdeaModel(i)"
               >
                 <div class="editor__idea-header">
                   <span class="editor__idea-title">{{ idea.title }}</span>
-                  <span class="editor__idea-status">{{ idea.status }}</span>
+                  <span v-if="placedIdeaIndices.includes(i)" class="editor__idea-status" style="color:var(--color-sage)">已放置</span>
+                  <span v-else class="editor__idea-status">{{ idea.status }}</span>
                 </div>
                 <p class="editor__idea-risk">⚠ {{ idea.risk }}</p>
                 <p class="editor__idea-asset">輔具：{{ idea.asset }}</p>
@@ -2213,6 +2243,16 @@ const historyIndex = computed(() => sceneObjectsStore.historyIndex)
 .editor__risk-bbox-block--active {
   background: rgba(240, 180, 41, 0.1);
   outline: 1px solid #f0b429;
+}
+
+.editor__risk-bbox-block--selected {
+  background: rgba(106, 153, 85, 0.1);
+  outline: 1px solid var(--color-sage);
+  cursor: pointer;
+}
+
+.editor__risk-bbox-block:not(.editor__risk-bbox-block--selected) {
+  cursor: pointer;
 }
 
 .editor__risk-bbox-row {

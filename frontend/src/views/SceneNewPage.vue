@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
+import { activateDevScene } from '../components/DevSceneCard.vue'
 
 const router = useRouter()
 
@@ -73,6 +74,7 @@ function runStage() {
           runStage()
         } else {
           step.value = 4
+          activateDevScene()
         }
       }, 350)
     }

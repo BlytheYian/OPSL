@@ -37,6 +37,7 @@ services:
         condition: service_healthy
     volumes:
       - ./backend/storage:/app/storage
+      - ./point_cloud.ply:/app/storage/models/dev/point_cloud.ply:ro
     extra_hosts:
       - "host.docker.internal:host-gateway"
 

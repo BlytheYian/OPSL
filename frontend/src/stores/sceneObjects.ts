@@ -173,7 +173,9 @@ export const useSceneObjectsStore = defineStore('sceneObjects', {
   actions: {
     async fetchInstancesForScene(sceneId: string) {
       const fetched = await api.get<SceneObjectInstance[]>(`/scenes/${encodeURIComponent(sceneId)}/objects`)
-      this.instances = [...this.instances.filter((i) => i.sceneId !== sceneId), ...fetched]
+      if (fetched.length > 0 || !this.loadedSceneIds.has(sceneId)) {
+        this.instances = [...this.instances.filter((i) => i.sceneId !== sceneId), ...fetched]
+      }
       this.loadedSceneIds.add(sceneId)
     },
     async addInstance(sceneId: string, modelId: string, label: string): Promise<SceneObjectInstance> {

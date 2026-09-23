@@ -33,3 +33,8 @@ scripts/
 *.log
 npm-debug.log*
 des.md
+OPSL/
+experiments/
+*.mp4
+*.ply
+*.png

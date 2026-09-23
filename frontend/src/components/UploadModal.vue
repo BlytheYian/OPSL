@@ -114,11 +114,9 @@ function handleClose() {
           <div class="upload-modal__choices">
             <button class="upload-modal__choice" type="button" @click="pickKind('object')">
               <span class="upload-modal__choice-title">模型元件</span>
-              <span class="upload-modal__choice-desc">單一模型檔案,.ply(gsplat)或 .glb(一般網格)格式</span>
             </button>
             <button class="upload-modal__choice" type="button" @click="pickKind('scene')">
               <span class="upload-modal__choice-title">場景資訊</span>
-              <span class="upload-modal__choice-desc">包含多個模型的場景檔案,例如 .usdz / .obj / .fbx</span>
             </button>
           </div>
         </template>
