@@ -1,0 +1,3 @@
+[submodule "gaussian-grouping"]
+	path = gaussian-grouping
+	url = https://github.com/lkeab/gaussian-grouping.git
